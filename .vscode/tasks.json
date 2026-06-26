@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AiRPG (sehui)",
+      "type": "shell",
+      "command": "node scripts/coord-chat.mjs --id sehui",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "G:\\ide\\Git\\bin\\bash.exe",
+          "args": ["-lc"]
+        },
+        "env": {
+          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "coord",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "agent-coord",
+          "endsPattern": "type /help"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "clear": true
+      }
+    }
+  ]
+}

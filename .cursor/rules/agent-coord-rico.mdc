@@ -1,0 +1,16 @@
+---
+description: agent-coord 채널(rico) 자동 응답 — coord-chat 연동
+alwaysApply: false
+---
+
+# agent-coord (rico)
+
+- MCP `agent-coord` 참가 ID: **rico**. 사람 상대는 보통 **sehui** (`coord-chat`).
+- 세션 시작 시 `join({agentId:"rico", project:"llm", role:"cursor", attach:false})` 호출.
+- `[agent-coord 자동 푸시]`로 주입된 메시지는 hook이 이미 읽음 처리함 → **`read_messages` 재호출 금지**.
+- 답장: `send_message({from:"rico", room:"general", text:"..."})` (DM이면 `to` 사용).
+- coord-chat 대화 중에는 턴 종료 후 stop hook이 새 메시지를 자동으로 이어줌. **이 Agent 채팅 탭을 열어 둘 것.**
+- **idle wake**: `coord-wake-daemon` (rico) / task `coord-wake-daemon (gemini)` — debounce 300ms.
+- **템플릿 자동응답은 꺼짐** (`COORD_AUTO_REPLY=0`). 리스너는 로그 + wake만.
+- session-start hook이 모델별 coord ID 주입 (gemini 모델 → `gemini`, 그 외 → `rico`).
+- **리스너**: task `coord-listener` 또는 `node .cursor/hooks/coord-listener.mjs`. Cursor 재시작 후 hook `followup_message`가 동작하려면 `install-powershell-shim.cmd` 실행.

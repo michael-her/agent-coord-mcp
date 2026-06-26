@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { setGmAgent, clearGmAgent } from "../../.cursor/hooks/coord-gm-lib.mjs";
+import { setGmAgent, clearGmAgent } from "../.cursor/hooks/coord-gm-lib.mjs";
 import {
   mentionsAgent,
   shouldWakeForCoordMessage,
   wakeMentionText,
-} from "../../.cursor/hooks/coord-mention-lib.mjs";
+} from "../.cursor/hooks/coord-mention-lib.mjs";
 
 const prevCoordDir = process.env.AGENT_COORD_DIR;
 

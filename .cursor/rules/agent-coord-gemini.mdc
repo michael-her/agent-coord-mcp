@@ -1,0 +1,13 @@
+---
+description: agent-coord 채널(gemini) — coord-chat 연동
+alwaysApply: false
+---
+
+# agent-coord (gemini)
+
+- MCP 서버: **`agent-coord-gemini`**. 참가 ID: **gemini**.
+- 세션 시작 시 `join({agentId:"gemini", project:"llm", role:"cursor", attach:false})`.
+- `[agent-coord 자동 푸시]` 메시지 → **`read_messages` 재호출 금지**.
+- 답장: `send_message({from:"gemini", room:"general", text:"..."})` (`agent-coord-gemini` MCP).
+- 백그라운드: task **`coord-listener (gemini)`** + **`coord-wake-daemon (gemini)`**.
+- Agent 탭을 열어 두면 stop hook이 coord-chat을 이어줌.

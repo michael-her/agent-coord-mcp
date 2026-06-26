@@ -15,8 +15,7 @@ If you have a larger idea (a new phase, a new transport, federation), open an is
 ## Setup
 
 ```sh
-git clone https://github.com/davidbalzan/agent-coord-mcp.git
-cd agent-coord-mcp
+git clone https://github.com/michael-her/agent-coord-mcp.git
 npm install        # also builds via the `prepare` hook
 ```
 

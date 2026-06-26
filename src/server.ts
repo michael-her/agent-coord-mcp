@@ -8,6 +8,8 @@ import { ensureDirs, readTokenMapSync } from "./store.js";
 import {
   attachAgentSchema,
   attachAgentTool,
+  batchSetAgentInventoriesSchema,
+  batchSetAgentInventoriesTool,
   clearTransportSchema,
   clearTransportTool,
   deleteRoomSchema,
@@ -18,6 +20,8 @@ import {
   doctorTool,
   forceUnregisterSchema,
   forceUnregisterTool,
+  getAgentInventoriesSchema,
+  getAgentInventoriesTool,
   heartbeatSchema,
   heartbeatTool,
   joinRoomSchema,
@@ -48,6 +52,8 @@ import {
   sendCommandTool,
   sendMessageSchema,
   sendMessageTool,
+  setAgentInventorySchema,
+  setAgentInventoryTool,
   setRoomMotdSchema,
   setRoomMotdTool,
   setRoomTopicSchema,
@@ -330,6 +336,27 @@ function buildServer(initialBound?: string): McpServer {
     "Admin eviction: unregisters any agent by targetAgentId regardless of the caller's identity. Detaches the agent's transport, removes it from all channel memberships, and drops its registry entry. Use after a reboot to clean up stale agents that can no longer unregister themselves.",
     forceUnregisterSchema,
     gate(null, forceUnregisterTool as (a: Record<string, unknown>) => Promise<unknown>),
+  );
+
+  server.tool(
+    "get_agent_inventories",
+    "Read TRPG inventory arrays from agents.json. Pass targetAgentId to read one agent, or omit to read all registered agents. Any registered agent may call this.",
+    getAgentInventoriesSchema,
+    gate("agentId", getAgentInventoriesTool as (a: Record<string, unknown>) => Promise<unknown>),
+  );
+
+  server.tool(
+    "set_agent_inventory",
+    "Replace one agent's inventory in agents.json. Only the TRPG GM (set via /gm in coord-chat) may update other agents' or humans' inventories.",
+    setAgentInventorySchema,
+    gate("agentId", setAgentInventoryTool as (a: Record<string, unknown>) => Promise<unknown>),
+  );
+
+  server.tool(
+    "batch_set_agent_inventories",
+    "Replace inventories for multiple agents in one call. Only the TRPG GM may use this — typical after a /saveinv request to persist loot/trades from recent chat.",
+    batchSetAgentInventoriesSchema,
+    gate("agentId", batchSetAgentInventoriesTool as (a: Record<string, unknown>) => Promise<unknown>),
   );
 
   return server;

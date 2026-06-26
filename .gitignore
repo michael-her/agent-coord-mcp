@@ -8,3 +8,10 @@ dist/
 
 # Coordinator live board (local only — never published; the backlog IS tracked)
 LIVE_STATE_*.md
+.cursor/hooks/*.pid
+.cursor/hooks/*.jsonl
+.cursor/hooks/*-state*.json
+.cursor/hooks/*-claimed*.json
+.cursor/hooks/coord-wake-agent-id*.txt
+.cursor/hooks/_test-batch.json
+.cursor/hooks/*.local.env

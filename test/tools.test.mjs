@@ -353,3 +353,79 @@ test("peek over the window reports overflow count but stashes no hash", async ()
   assert.equal(real.totalNew, 55);
   assert.ok(real.history.hash);
 });
+
+test("get_agent_inventories returns registry inventories", async () => {
+  await t.registerTool({ agentId: "gm", role: "cursor" });
+  await t.registerTool({ agentId: "player", role: "human" });
+  await store.updateJson(store.AGENTS_FILE, {}, (current) => {
+    current.gm.inventory = [{ name: "gold", quantity: 50 }];
+    current.player.inventory = [{ name: "gold", quantity: 100 }];
+    return current;
+  });
+
+  const all = await t.getAgentInventoriesTool({ agentId: "gm" });
+  assert.equal(all.ok, true);
+  assert.deepEqual(all.inventories.gm, [{ name: "gold", quantity: 50 }]);
+  assert.deepEqual(all.inventories.player, [{ name: "gold", quantity: 100 }]);
+
+  const one = await t.getAgentInventoriesTool({ agentId: "gm", targetAgentId: "player" });
+  assert.deepEqual(one.inventories, { player: [{ name: "gold", quantity: 100 }] });
+});
+
+test("only TRPG GM may set other agents' inventories", async () => {
+  await t.registerTool({ agentId: "gm", role: "cursor" });
+  await t.registerTool({ agentId: "rico", role: "cursor" });
+  await t.registerTool({ agentId: "sehui", role: "human" });
+  await store.writeJson(
+    store.GM_FILE,
+    { agentId: "gm", room: "general", setBy: "sehui", setAt: Date.now() },
+  );
+
+  const denied = await t.setAgentInventoryTool({
+    agentId: "rico",
+    targetAgentId: "sehui",
+    inventory: [{ name: "potion", quantity: 1 }],
+  });
+  assert.equal(denied.ok, false);
+  assert.match(denied.error, /only TRPG GM/);
+
+  const ok = await t.setAgentInventoryTool({
+    agentId: "gm",
+    targetAgentId: "sehui",
+    inventory: [
+      { name: "gold", quantity: 80 },
+      { name: "공허가 깃든 성궤", quantity: 1 },
+    ],
+  });
+  assert.equal(ok.ok, true);
+
+  const read = await t.getAgentInventoriesTool({ agentId: "gm", targetAgentId: "sehui" });
+  assert.deepEqual(read.inventories.sehui, [
+    { name: "gold", quantity: 80 },
+    { name: "공허가 깃든 성궤", quantity: 1 },
+  ]);
+});
+
+test("batch_set_agent_inventories updates multiple agents", async () => {
+  await t.registerTool({ agentId: "gm", role: "cursor" });
+  await t.registerTool({ agentId: "rico", role: "cursor" });
+  await t.registerTool({ agentId: "gemini", role: "cursor" });
+  await store.writeJson(
+    store.GM_FILE,
+    { agentId: "gm", room: "general", setBy: "sehui", setAt: Date.now() },
+  );
+
+  const res = await t.batchSetAgentInventoriesTool({
+    agentId: "gm",
+    updates: [
+      { targetAgentId: "rico", inventory: [{ name: "gold", quantity: 120 }] },
+      { targetAgentId: "gemini", inventory: [{ name: "gold", quantity: 90 }] },
+    ],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.updated.length, 2);
+
+  const read = await t.getAgentInventoriesTool({ agentId: "gm" });
+  assert.deepEqual(read.inventories.rico, [{ name: "gold", quantity: 120 }]);
+  assert.deepEqual(read.inventories.gemini, [{ name: "gold", quantity: 90 }]);
+});

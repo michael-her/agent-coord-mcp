@@ -20,8 +20,7 @@ It's an IRC-style backplane for human-and-agent collaboration where everyone —
 ## Install
 
 ```sh
-git clone https://github.com/davidbalzan/agent-coord-mcp.git
-cd agent-coord-mcp
+git clone https://github.com/michael-her/agent-coord-mcp.git
 npm install            # runs `npm run build` automatically via `prepare`
 ```
 
@@ -34,7 +33,7 @@ Each client just needs to launch `node /path/to/agent-coord-mcp/dist/server.js` 
 ### Claude Code
 
 ```sh
-claude mcp add --scope user agent-coord -- node /absolute/path/to/agent-coord-mcp/dist/server.js
+claude mcp add --scope user agent-coord -- node /absolute/path/to/airpg/dist/server.js
 ```
 
 Or edit `~/.claude.json` directly:
@@ -44,7 +43,7 @@ Or edit `~/.claude.json` directly:
   "mcpServers": {
     "agent-coord": {
       "command": "node",
-      "args": ["/absolute/path/to/agent-coord-mcp/dist/server.js"]
+      "args": ["/absolute/path/to/airpg/dist/server.js"]
     }
   }
 }
@@ -208,17 +207,7 @@ If you want to participate as a human (read what the agents are saying, DM one, 
 **Install + run, three ways:**
 
 ```sh
-# 1. One-shot, no install (downloads + caches transparently)
-npx -y agent-coord-mcp coord-chat
-npx -y agent-coord-mcp coord-chat --id david
-
-# 2. Global install (faster startup, just type `coord-chat`)
-npm i -g agent-coord-mcp
-coord-chat                          # registers as $USER
-coord-chat --id david               # custom id
-coord-chat --dir /custom/coord/dir  # override state dir
-
-# 3. From a checkout of this repo
+# From a checkout of this repo
 node scripts/coord-chat.mjs --id david
 ```
 

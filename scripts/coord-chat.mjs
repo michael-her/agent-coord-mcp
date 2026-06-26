@@ -47,15 +47,28 @@ import {
   rollDiceExpr,
   standardDiceList,
 } from "./coord-dice.mjs";
-import { mentionsAgent } from "../../.cursor/hooks/coord-mention-lib.mjs";
+import { mentionsAgent } from "../.cursor/hooks/coord-mention-lib.mjs";
 import {
   clearGmAgent,
   getGmAgent,
   setGmAgent,
-} from "../../.cursor/hooks/coord-gm-lib.mjs";
+} from "../.cursor/hooks/coord-gm-lib.mjs";
+import {
+  clearTransportMarker,
+  inviteAgent,
+  isInvited,
+  listInvited,
+  parseInviteSpec,
+  isInviteAllArg,
+  collectRegistryInviteTargets,
+  stopAgent,
+  stopAll,
+  writeTransportMarker,
+} from "./coord-agent-spawn.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(SCRIPT_DIR, "..", "..");
+const REPO = path.resolve(SCRIPT_DIR, "..");
+const HOOKS_DIR = path.join(REPO, ".cursor", "hooks");
 
 // ---------- args ----------
 
@@ -292,8 +305,9 @@ const SLASH_COMMANDS = [
   "/clear", "/cls", "/me", "/status", "/away", "/back", "/ignore", "/unignore",
   "/nick", "/join", "/part", "/leave", "/rooms", "/channels", "/topic", "/motd",
   "/rules", "/prune", "/kick", "/wipe-room",
+  "/invite", "/uninvite", "/invited",
   "/d", "/d4", "/d6", "/d8", "/d10", "/d12", "/d20", "/d100", "/d%", "/roll", "/dice",
-  "/gm",
+  "/gm", "/saveinv",
   "/@", "/@all",
   "/help", "/?", "/quit", "/exit",
 ];
@@ -409,6 +423,7 @@ let toreDown = false;
 function shutdown() {
   if (toreDown) return;
   toreDown = true;
+  stopAll(HOOKS_DIR);
   clearInterval(drainTimer);
   clearInterval(promptTimer);
   teardownFooter();
@@ -496,6 +511,17 @@ async function handleLine(line) {
       const m = text.match(/^\/prune(?:\s+(\d+))?$/);
       const days = m && m[1] ? parseInt(m[1], 10) : 7;
       await pruneOld(days);
+    } else if (text === "/invite" || text.startsWith("/invite ")) {
+      await handleInviteCommand(text);
+    } else if (
+      text === "/uninvite" ||
+      text.startsWith("/uninvite ") ||
+      text === "/dismiss" ||
+      text.startsWith("/dismiss ")
+    ) {
+      await handleUninviteCommand(text);
+    } else if (text === "/invited") {
+      printInvitedAgents();
     } else if (text.startsWith("/kick ")) {
       const target = text.slice(6).trim();
       if (!target) say(A.red("usage: /kick <agentId>"));
@@ -512,6 +538,8 @@ async function handleLine(line) {
       await rollDiceCommand(text);
     } else if (text === "/gm" || text.startsWith("/gm ")) {
       await handleGmCommand(text);
+    } else if (/^\/saveinv(?:\s+\d+)?$/i.test(text)) {
+      await handleSaveInvCommand(text);
     } else if (text === "/@") {
       setAutoMention(null);
       say(A.dim("auto-mention off"));
@@ -702,7 +730,7 @@ function printBanner() {
   const lines = [
     A.bold(A.cyan("  agent-coord  ")) + A.dim("— shared chat for agents and humans"),
     A.dim(`  agentId=${A.reset}${agentColor(ID)(ID)}${A.dim("  dir=" + ROOT)}`),
-    A.dim("  type /help for commands · /quit to leave"),
+    A.dim("  type /help for commands · /invite <model>@<id> · /invite @all · /quit to leave"),
   ];
   for (const l of lines) process.stdout.write(l + "\n");
 }
@@ -727,7 +755,8 @@ function printHelp() {
     [A.dim("--- TRPG GM ---"), ""],
     ["/gm <agentId>",       "set TRPG GM (e.g. /gm gemini)"],
     ["/gm",                 "show current GM"],
-    ["/gm off",             "clear GM role"],
+    ["/gm off",               "clear GM role"],
+    ["/saveinv [n]",          "ask TRPG GM to sync inventories from last n messages (default 5)"],
     ["/status <text>",      "post to the status broadcast channel"],
     [A.dim("--- channels ---"), ""],
     ["/join <#chan>",       "join (and switch to) a channel, creating it if new"],
@@ -737,6 +766,10 @@ function printHelp() {
     ["/motd [text]",        "show or set the channel rules (MOTD)"],
     [A.dim("--- people ---"), ""],
     ["/list, /who",         "show registered agents + transports"],
+    ["/invite <model>@<id>","spawn listener + wake-daemon (e.g. gemini-3-flash@gemini)"],
+    ["/invite @all",          "invite every registered agent (id + model from agents.json)"],
+    ["/invited",            "list agents managed by this coord-chat"],
+    ["/uninvite <id>",      "stop managed listener + wake-daemon"],
     ["/whois <agent>",      "show an agent's detail (role, channels, status)"],
     ["/whoami",             "show your registration + transport"],
     ["/nick <name>",        "rename yourself (migrates inbox/history)"],
@@ -829,6 +862,7 @@ async function register() {
       registeredAt: existing?.registeredAt ?? now,
       lastHeartbeat: now,
       away: existing?.away,
+      inventory: existing?.inventory,
     };
     writeJsonAtomic(AGENTS_FILE, reg);
   });
@@ -964,6 +998,8 @@ function resetRoomOffsets(chan) {
 }
 
 async function kickAgent(target) {
+  stopAgent(target, HOOKS_DIR);
+  clearTransportMarker(TRANSPORT_DIR, target);
   let existed = false;
   await withLock(AGENTS_FILE, async () => {
     const reg = readJsonSafe(AGENTS_FILE, {});
@@ -977,14 +1013,7 @@ async function kickAgent(target) {
     say(A.red(`agent '${target}' not registered`));
     return;
   }
-  // Best-effort: kill their pusher and remove the transport marker so they
-  // disappear immediately from list_agents instead of hanging around with a
-  // live transport pointer.
   const markerPath = path.join(TRANSPORT_DIR, `${sanitize(target)}.json`);
-  const marker = readJsonSafe(markerPath, null);
-  if (marker?.pid) {
-    try { process.kill(marker.pid, "SIGTERM"); } catch {}
-  }
   try { if (existsSync(markerPath)) unlinkSync(markerPath); } catch {}
   // Remove the kicked agent's inbox + cursor so they don't sit orphaned in
   // ~/agent-coord/ taking up listing space and confusing future bookkeeping.
@@ -992,7 +1021,163 @@ async function kickAgent(target) {
   const cursorPath = path.join(CURSOR_DIR, `${sanitize(target)}.json`);
   try { if (existsSync(inboxPath)) unlinkSync(inboxPath); } catch {}
   try { if (existsSync(cursorPath)) unlinkSync(cursorPath); } catch {}
-  say(A.dim(`→ kicked ${target} (registry, transport, inbox, cursor all cleared)`));
+  say(A.dim(`→ kicked ${target} (registry, transport, inbox, cursor, managed stack cleared)`));
+}
+
+async function handleInviteCommand(text) {
+  const arg = text.slice(7).trim();
+  if (!arg) {
+    printInvitedAgents();
+    return;
+  }
+  if (isInviteAllArg(arg)) {
+    await handleInviteAllCommand();
+    return;
+  }
+  const spec = parseInviteSpec(arg);
+  if (!spec) {
+    say(
+      A.red("usage: /invite <model>@<agentId>") +
+        A.dim("  (e.g. /invite gemini-3-flash@gemini) or /invite @all"),
+    );
+    return;
+  }
+  try {
+    await doInviteAgent(spec);
+  } catch (err) {
+    say(A.red(`invite failed: ${err?.message ?? err}`));
+  }
+}
+
+function onInviteChildExit({ agentId, label, code, signal, error }) {
+  clearTransportMarker(TRANSPORT_DIR, agentId);
+  if (toreDown) return;
+  const why = error ?? signal ?? code ?? "?";
+  say(A.dim(`invite: ${agentColor(agentId)(agentId)} ${label} exited (${why})`));
+}
+
+async function doInviteAgent(spec, { announce = true } = {}) {
+  const result = inviteAgent({
+    agentId: spec.agentId,
+    model: spec.model,
+    hooksDir: HOOKS_DIR,
+    projectDir: REPO,
+    coordDir: ROOT,
+    onChildExit: onInviteChildExit,
+  });
+  await registerInvitedAgent(spec.agentId, spec.model);
+  writeTransportMarker({
+    transportDir: TRANSPORT_DIR,
+    agentId: spec.agentId,
+    model: spec.model,
+    listener: result.listener,
+    daemon: result.daemon,
+  });
+  if (announce) {
+    await sendSystem(currentRoom, `invited ${spec.agentId} (${spec.model})`);
+  }
+  say(
+    `${A.green("invited")} ${agentColor(spec.agentId)(spec.agentId)} ` +
+      A.dim(`model=${spec.model} listener=${result.listenerPid} daemon=${result.daemonPid}`),
+  );
+  return result;
+}
+
+async function handleInviteAllCommand() {
+  const reg = readJsonSafe(AGENTS_FILE, {});
+  const models = readJsonSafe(MODELS_FILE, {});
+  const { targets, skipped } = collectRegistryInviteTargets({
+    registry: reg,
+    models,
+    defaults: WORKSPACE_DEFAULT_MODELS,
+    excludeId: ID,
+  });
+  if (!targets.length) {
+    say(A.dim("no invitable agents in registry (excluding you)"));
+    for (const s of skipped) {
+      say(A.dim(`  skip ${agentColor(s.agentId)(s.agentId)}: ${s.reason}`));
+    }
+    return;
+  }
+  say(A.dim(`inviting ${targets.length} agent(s) from agents.json…`));
+  const invited = [];
+  let failed = 0;
+  for (const spec of targets) {
+    try {
+      await doInviteAgent(spec, { announce: false });
+      invited.push(spec);
+    } catch (err) {
+      failed++;
+      say(A.red(`invite failed for ${spec.agentId}: ${err?.message ?? err}`));
+    }
+  }
+  if (invited.length) {
+    const summary = invited.map((s) => `${s.agentId} (${s.model})`).join(", ");
+    await sendSystem(currentRoom, `invited ${summary}`);
+  }
+  for (const s of skipped) {
+    say(A.dim(`  skip ${agentColor(s.agentId)(s.agentId)}: ${s.reason}`));
+  }
+  say(
+    A.dim(
+      `done: ${invited.length} invited` +
+        (failed ? `, ${failed} failed` : "") +
+        (skipped.length ? `, ${skipped.length} skipped` : ""),
+    ),
+  );
+}
+
+async function handleUninviteCommand(text) {
+  const arg = text.replace(/^\/(uninvite|dismiss)\s*/, "").trim().toLowerCase();
+  if (!arg) {
+    say(A.red("usage: /uninvite <agentId>"));
+    return;
+  }
+  if (stopAgent(arg, HOOKS_DIR)) {
+    clearTransportMarker(TRANSPORT_DIR, arg);
+    await sendSystem(currentRoom, `uninvited ${arg}`);
+    say(A.dim(`→ stopped ${agentColor(arg)(arg)} (listener + wake-daemon)`));
+  } else {
+    say(A.dim(`→ no managed stack for ${arg}`));
+  }
+}
+
+function printInvitedAgents() {
+  const rows = listInvited();
+  if (!rows.length) {
+    say(A.dim("no agents managed by this coord-chat — /invite <model>@<id>"));
+    return;
+  }
+  say(A.bold(`invited (${rows.length}):`));
+  for (const r of rows) {
+    const live = r.listenerAlive && r.daemonAlive;
+    const dot = live ? A.green("●") : A.dim("○");
+    say(
+      `  ${dot} ${agentColor(r.agentId)(r.agentId.padEnd(12))} ` +
+        A.dim(`${r.model}  listener=${r.listenerPid ?? "-"} daemon=${r.daemonPid ?? "-"}`),
+    );
+  }
+}
+
+async function registerInvitedAgent(agentId, model) {
+  await withLock(AGENTS_FILE, async () => {
+    const reg = readJsonSafe(AGENTS_FILE, {});
+    const now = Date.now();
+    const existing = reg[agentId];
+    reg[agentId] = {
+      agentId,
+      role: existing?.role ?? "cursor",
+      model,
+      registeredAt: existing?.registeredAt ?? now,
+      lastHeartbeat: now,
+      inventory: existing?.inventory,
+    };
+    writeJsonAtomic(AGENTS_FILE, reg);
+  });
+  await updateRooms((rooms) => {
+    const e = (rooms[DEFAULT_ROOM] ??= { createdAt: Date.now(), createdBy: ID, members: [] });
+    if (!e.members.includes(agentId)) e.members.push(agentId);
+  });
 }
 
 async function findInHistory(term) {
@@ -1247,7 +1432,7 @@ async function rollInlineDiceCommand({ narrative, expr }) {
     const result = rollDiceExpr(expr);
     const body = formatCombinedDiceMessage(ID, applyAutoMention(narrative), result);
     await sendDiceResult(body);
-    say(A.dim(`→ ${body.replace(/\n/g, "\n   ")}`));
+    say(A.dim(`→ ${formatDiceLine(ID, result)}`));
   } catch (err) {
     say(A.red(`dice: ${err?.message ?? err}`));
   }
@@ -1294,6 +1479,52 @@ async function handleGmCommand(text) {
   await sendSystem(currentRoom, `set ${arg} as TRPG GM`);
   say(`${A.green("TRPG GM:")} ${agentColor(arg)(`GM:${arg}`)}`);
   refreshPrompt();
+}
+
+const SAVEINV_DEFAULT_MESSAGES = 5;
+
+async function handleSaveInvCommand(text) {
+  const m = text.match(/^\/saveinv(?:\s+(\d+))?$/i);
+  const limit = m?.[1] ? parseInt(m[1], 10) : SAVEINV_DEFAULT_MESSAGES;
+  if (!Number.isFinite(limit) || limit < 1) {
+    say(A.red("usage: /saveinv [messageCount]"));
+    return;
+  }
+  const gm = getGmAgent(currentRoom);
+  if (!gm) {
+    say(A.red("no TRPG GM set") + A.dim("  (use /gm <agentId> first)"));
+    return;
+  }
+  const reg = readJsonSafe(AGENTS_FILE, {});
+  const inventories = {};
+  for (const [id, entry] of Object.entries(reg)) {
+    inventories[id] = entry.inventory ?? [];
+  }
+  const recent = readJsonl(roomFile(currentRoom))
+    .filter((msg) => !msg.system && !msg.control)
+    .slice(-limit);
+  const historyLines = recent.map((msg) => `${msg.from}: ${msg.text}`).join("\n");
+  const body = [
+    `@${gm} [saveinv]`,
+    "Review the recent chat and update each participant's inventory in agents.json.",
+    "Use MCP: get_agent_inventories (confirm state), then batch_set_agent_inventories (save all changes).",
+    "Track item gains, losses, trades, and spent consumables from the narrative.",
+    "",
+    "Current inventories:",
+    JSON.stringify(inventories, null, 2),
+    "",
+    `Recent #${currentRoom} messages (last ${recent.length}):`,
+    historyLines || "(none)",
+    "",
+    "Reply with a concise summary of inventory changes after saving.",
+  ].join("\n");
+  await appendMessage(roomFile(currentRoom), {
+    from: ID,
+    room: currentRoom,
+    text: body,
+    model: "human",
+  });
+  say(A.dim(`→ saveinv requested from ${agentColor(gm)(`GM:${gm}`)} (${recent.length} messages)`));
 }
 
 async function appendMessage(file, partial) {
@@ -1523,12 +1754,17 @@ async function printAgents() {
   for (const id of ids) {
     const a = reg[id];
     const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(id)}.json`), null);
-    const live = marker && marker.pid && pidAlive(marker.pid);
+    const managed = listInvited().find((r) => r.agentId === id);
+    const live =
+      (managed && managed.listenerAlive && managed.daemonAlive) ||
+      (marker && marker.pid && pidAlive(marker.pid));
     const onlineNow = live || now - a.lastHeartbeat < STALE;
     const dot = onlineNow ? A.green("●") : A.dim("○");
     const status = onlineNow ? "online " : "offline";
     const role = (a.role ?? "-").padEnd(roleW);
-    const trans = live ? A.green(marker.transport) : A.dim("none");
+    const trans = live
+      ? A.green(marker?.transport === "coord-chat" ? "coord-chat" : (marker?.transport ?? "coord-chat"))
+      : A.dim("none");
     const me = id === ID ? A.dim(" (you)") : "";
     say(`  ${dot} ${agentColor(id)(id.padEnd(idW))}  ${A.dim(status)}  ${role}  ${trans}${me}`);
   }
@@ -1550,7 +1786,10 @@ function onlineAgentIds() {
     .filter((id) => {
       const a = reg[id];
       const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(id)}.json`), null);
-      const live = marker && marker.pid && pidAlive(marker.pid);
+      const managed = listInvited().find((r) => r.agentId === id);
+      const live =
+        (managed && managed.listenerAlive && managed.daemonAlive) ||
+        (marker && marker.pid && pidAlive(marker.pid));
       return live || now - (a?.lastHeartbeat ?? 0) < STALE;
     })
     .sort();

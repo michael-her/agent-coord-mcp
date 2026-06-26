@@ -10,7 +10,7 @@ import {
   gmWakeReplyTail,
   isGmAgent,
   setGmAgent,
-} from "../../.cursor/hooks/coord-gm-lib.mjs";
+} from "../.cursor/hooks/coord-gm-lib.mjs";
 
 const prevDir = process.env.AGENT_COORD_DIR;
 

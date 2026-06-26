@@ -51,6 +51,7 @@ export const DEFAULT_ROOM = "general";
 // from/agentId field. Absent → advisory mode (legacy behaviour, with a
 // startup warning). Should be mode 600; operator-managed.
 export const TOKENS_FILE = path.join(ROOT, "tokens.json");
+export const GM_FILE = path.join(ROOT, "trpg-gm.json");
 
 export function ensureDirs(): void {
   for (const d of [ROOT, INBOX_DIR, CURSOR_DIR, TRANSPORT_DIR, PID_DIR, LOG_DIR, ROOMS_DIR, RECEIPTS_DIR, HISTORY_DIR]) {

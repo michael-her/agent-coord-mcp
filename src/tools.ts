@@ -10,6 +10,7 @@ import {
   CURSOR_DIR,
   DEFAULT_ROOM,
   INBOX_DIR,
+  GM_FILE,
   ROOT,
   ROOM_FILE,
   ROOMS_DIR,
@@ -48,6 +49,12 @@ import {
   type RoomRegistry,
 } from "./store.js";
 
+type InventoryItem = {
+  name: string;
+  quantity: number;
+  note?: string;
+};
+
 type AgentEntry = {
   agentId: string;
   project?: string;
@@ -56,6 +63,7 @@ type AgentEntry = {
   registeredAt: number;
   lastHeartbeat: number;
   capabilities?: string[];
+  inventory?: InventoryItem[];
 };
 
 type TransportMarker = {
@@ -169,6 +177,7 @@ export async function registerTool(args: {
       registeredAt: existing?.registeredAt ?? now,
       lastHeartbeat: now,
       capabilities: existing?.capabilities,
+      inventory: existing?.inventory,
     };
     return current;
   });
@@ -2051,6 +2060,144 @@ export const forceUnregisterSchema = {
 // so the caller does not need to be the target agent.
 export async function forceUnregisterTool(args: { targetAgentId: string }) {
   return unregisterTool({ agentId: args.targetAgentId });
+}
+
+// ---------- inventory (TRPG) ----------
+
+const inventoryItemSchema = z.object({
+  name: z.string().min(1),
+  quantity: z.number(),
+  note: z.string().optional(),
+});
+
+function normalizeInventoryItem(item: InventoryItem): InventoryItem {
+  const out: InventoryItem = {
+    name: String(item.name).trim(),
+    quantity: Number(item.quantity),
+  };
+  if (item.note?.trim()) out.note = item.note.trim();
+  return out;
+}
+
+async function loadGmAgentId(room = DEFAULT_ROOM): Promise<string | null> {
+  const s = await readJson<{ agentId?: string; room?: string } | null>(GM_FILE, null);
+  const id = String(s?.agentId ?? "").trim().toLowerCase();
+  if (!id) return null;
+  const gmRoom = normalizeRoom(s?.room ?? DEFAULT_ROOM);
+  if (normalizeRoom(room) !== gmRoom) return null;
+  return id;
+}
+
+async function requireGm(agentId: string, room = DEFAULT_ROOM) {
+  const gm = await loadGmAgentId(room);
+  const caller = agentId.trim().toLowerCase();
+  if (!gm) {
+    return { ok: false as const, error: "no TRPG GM is set — use /gm <agentId> in coord-chat first" };
+  }
+  if (gm !== caller) {
+    return {
+      ok: false as const,
+      error: `only TRPG GM '${gm}' may update other agents' inventory (caller is '${caller}')`,
+    };
+  }
+  return null;
+}
+
+export const getAgentInventoriesSchema = {
+  agentId: z.string().min(1),
+  targetAgentId: z.string().optional(),
+};
+
+/** Read inventory arrays from agents.json (any registered agent). */
+export async function getAgentInventoriesTool(args: {
+  agentId: string;
+  targetAgentId?: string;
+}) {
+  const reg = await readJson<AgentRegistry>(AGENTS_FILE, {});
+  if (!reg[args.agentId]) {
+    return { ok: false, error: `agent '${args.agentId}' not registered` };
+  }
+  const filter = args.targetAgentId?.trim().toLowerCase();
+  const inventories: Record<string, InventoryItem[]> = {};
+  for (const [id, entry] of Object.entries(reg)) {
+    if (filter && id !== filter) continue;
+    inventories[id] = entry.inventory ?? [];
+  }
+  if (filter && !inventories[filter]) {
+    return { ok: false, error: `agent '${filter}' not registered` };
+  }
+  return { ok: true, inventories };
+}
+
+export const setAgentInventorySchema = {
+  agentId: z.string().min(1),
+  targetAgentId: z.string().min(1),
+  inventory: z.array(inventoryItemSchema),
+};
+
+/** Replace one agent's inventory. TRPG GM only. */
+export async function setAgentInventoryTool(args: {
+  agentId: string;
+  targetAgentId: string;
+  inventory: InventoryItem[];
+}) {
+  const denied = await requireGm(args.agentId);
+  if (denied) return denied;
+
+  const target = args.targetAgentId.trim().toLowerCase();
+  const inventory = args.inventory.map(normalizeInventoryItem);
+  let missing = false;
+  await updateJson<AgentRegistry>(AGENTS_FILE, {}, (current) => {
+    if (!current[target]) {
+      missing = true;
+      return current;
+    }
+    current[target].inventory = inventory;
+    return current;
+  });
+  if (missing) return { ok: false, error: `agent '${target}' not registered` };
+  return { ok: true, targetAgentId: target, inventory };
+}
+
+export const batchSetAgentInventoriesSchema = {
+  agentId: z.string().min(1),
+  updates: z
+    .array(
+      z.object({
+        targetAgentId: z.string().min(1),
+        inventory: z.array(inventoryItemSchema),
+      }),
+    )
+    .min(1),
+};
+
+/** Replace inventories for multiple agents in one call. TRPG GM only. */
+export async function batchSetAgentInventoriesTool(args: {
+  agentId: string;
+  updates: Array<{ targetAgentId: string; inventory: InventoryItem[] }>;
+}) {
+  const denied = await requireGm(args.agentId);
+  if (denied) return denied;
+
+  const applied: Array<{ targetAgentId: string; inventory: InventoryItem[] }> = [];
+  const missing: string[] = [];
+  await updateJson<AgentRegistry>(AGENTS_FILE, {}, (current) => {
+    for (const u of args.updates) {
+      const target = u.targetAgentId.trim().toLowerCase();
+      if (!current[target]) {
+        missing.push(target);
+        continue;
+      }
+      const inventory = u.inventory.map(normalizeInventoryItem);
+      current[target].inventory = inventory;
+      applied.push({ targetAgentId: target, inventory });
+    }
+    return current;
+  });
+  if (!applied.length) {
+    return { ok: false, error: "no inventories updated", missing };
+  }
+  return { ok: true, updated: applied, missing: missing.length ? missing : undefined };
 }
 
 // ---------- helpers ----------

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "agent-coord": {
+      "command": "node",
+      "args": ["G:/dev/airpg/dist/server.js"],
+      "env": {
+        "AGENT_COORD_BOUND_AGENT": "rico",
+        "AGENT_COORD_DIR": "C:/Users/sehui/agent-coord",
+        "AGENT_COORD_MODEL": "composer-2.5"
+      }
+    }
+  }
+}
