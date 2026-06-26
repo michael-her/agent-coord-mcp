@@ -52,6 +52,7 @@ type AgentEntry = {
   agentId: string;
   project?: string;
   role?: string;
+  model?: string;
   registeredAt: number;
   lastHeartbeat: number;
   capabilities?: string[];
@@ -83,6 +84,7 @@ type Message = {
   to?: string;
   room?: string;
   text: string;
+  model?: string;
   // System notices (join/part/topic/nick) — rendered distinctly by clients.
   system?: boolean;
   // Control commands (`/clear`, `/compact`) addressed at the agent's CLI, not
@@ -147,9 +149,15 @@ export const registerSchema = {
   agentId: z.string().min(1),
   project: z.string().optional(),
   role: z.string().optional(),
+  model: z.string().optional(),
 };
 
-export async function registerTool(args: { agentId: string; project?: string; role?: string }) {
+export async function registerTool(args: {
+  agentId: string;
+  project?: string;
+  role?: string;
+  model?: string;
+}) {
   const reg = await updateJson<AgentRegistry>(AGENTS_FILE, {}, (current) => {
     const now = Date.now();
     const existing = current[args.agentId];
@@ -157,6 +165,7 @@ export async function registerTool(args: { agentId: string; project?: string; ro
       agentId: args.agentId,
       project: args.project ?? existing?.project,
       role: args.role ?? existing?.role,
+      model: args.model ?? existing?.model,
       registeredAt: existing?.registeredAt ?? now,
       lastHeartbeat: now,
       capabilities: existing?.capabilities,
@@ -217,9 +226,12 @@ export async function quitTool(args: { agentId: string }): Promise<never> {
 
 // ---------- heartbeat ----------
 
-export const heartbeatSchema = { agentId: z.string().min(1) };
+export const heartbeatSchema = {
+  agentId: z.string().min(1),
+  model: z.string().optional(),
+};
 
-export async function heartbeatTool(args: { agentId: string }) {
+export async function heartbeatTool(args: { agentId: string; model?: string }) {
   let missing = false;
   await updateJson<AgentRegistry>(AGENTS_FILE, {}, (current) => {
     if (!current[args.agentId]) {
@@ -227,6 +239,7 @@ export async function heartbeatTool(args: { agentId: string }) {
       return current;
     }
     current[args.agentId].lastHeartbeat = Date.now();
+    if (args.model?.trim()) current[args.agentId].model = args.model.trim();
     return current;
   });
   if (missing) return { ok: false, error: `agent '${args.agentId}' not registered` };
@@ -317,11 +330,21 @@ function isPidAlive(pid: number): boolean {
 
 // ---------- send_message ----------
 
+function resolveOutboundModel(from: string, explicit?: string): string | undefined {
+  const named = explicit?.trim();
+  if (named) return named;
+  const bound = process.env.AGENT_COORD_BOUND_AGENT?.trim();
+  const envModel = process.env.AGENT_COORD_MODEL?.trim();
+  if (bound && envModel && from === bound) return envModel;
+  return undefined;
+}
+
 export const sendMessageSchema = {
   from: z.string().min(1),
   to: z.string().optional(),
   room: z.string().optional(),
   text: z.string().min(1),
+  model: z.string().optional(),
 };
 
 export async function sendMessageTool(args: {
@@ -329,7 +352,9 @@ export async function sendMessageTool(args: {
   to?: string;
   room?: string;
   text: string;
+  model?: string;
 }) {
+  const model = resolveOutboundModel(args.from, args.model);
   // DM → inbox. Otherwise resolve the channel (default `general`), make sure it
   // exists in the registry, and tag the message with its channel.
   if (args.to) {
@@ -339,6 +364,7 @@ export async function sendMessageTool(args: {
       from: args.from,
       to: args.to,
       text: args.text,
+      ...(model ? { model } : {}),
     };
     const target = inboxFile(args.to);
     await appendJsonl(target, msg);
@@ -360,6 +386,7 @@ export async function sendMessageTool(args: {
     from: args.from,
     room: chan,
     text: args.text,
+    ...(model ? { model } : {}),
   };
   const target = roomFile(chan);
   await appendJsonl(target, msg);
@@ -1270,6 +1297,7 @@ export const joinSchema = {
   agentId: z.string().min(1),
   project: z.string().optional(),
   role: z.string().optional(),
+  model: z.string().optional(),
   // attach: undefined → auto-attach if $TMUX_PANE is set; true → always try;
   // false → never; object → attach with overrides.
   attach: z.union([z.boolean(), joinAttachOptionsSchema]).optional(),
@@ -1280,6 +1308,7 @@ export async function joinTool(args: {
   agentId: string;
   project?: string;
   role?: string;
+  model?: string;
   attach?: boolean | { tmuxTarget?: string; includeRoom?: boolean; allowlist?: string[]; debounceMs?: number };
   readInbox?: boolean;
 }) {
@@ -1287,6 +1316,7 @@ export async function joinTool(args: {
     agentId: args.agentId,
     project: args.project,
     role: args.role,
+    model: args.model,
   });
 
   // Decide attach behavior.

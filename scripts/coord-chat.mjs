@@ -36,7 +36,26 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
+import {
+  formatCombinedDiceMessage,
+  formatDiceLine,
+  isDiceHelpCommand,
+  parseDiceCommand,
+  parseTrailingDiceCommand,
+  rollDiceExpr,
+  standardDiceList,
+} from "./coord-dice.mjs";
+import { mentionsAgent } from "../../.cursor/hooks/coord-mention-lib.mjs";
+import {
+  clearGmAgent,
+  getGmAgent,
+  setGmAgent,
+} from "../../.cursor/hooks/coord-gm-lib.mjs";
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(SCRIPT_DIR, "..", "..");
 
 // ---------- args ----------
 
@@ -54,17 +73,11 @@ const ROOT = args.dir ?? process.env.AGENT_COORD_DIR ?? path.join(homedir(), "ag
 const GROUP_WINDOW = 2 * 60 * 1000;
 let lastBlock = { who: null, ts: 0, kind: null };
 
-// Whether the ephemeral suggestion hint is currently occupying the slot above
-// the prompt (see drawHint/clearHint). Declared early so say(), called during
-// startup replay, can reference it without tripping the const/let TDZ.
 let hintActive = false;
 
-// Matches "@<this agent>" not followed by a name char, so we can flag messages
-// that ping the current user. ID may contain regex metachars — escape it.
-let SELF_MENTION_RE = new RegExp(
-  "@" + ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![A-Za-z0-9._-])",
-);
-const mentionsSelf = (text) => SELF_MENTION_RE.test(text ?? "");
+// Auto-mention mode: null | "all" | agent id — prepended to outgoing room text.
+let autoMention = null;
+const mentionsSelf = (text) => mentionsAgent(text, ID);
 
 // Recency at a glance: "now" / "5m" for fresh messages, falling back to a wall
 // clock for anything over an hour (a stale "63m" reads worse than "08:34").
@@ -80,7 +93,77 @@ const INBOX_DIR = path.join(ROOT, "inbox");
 const CURSOR_DIR = path.join(ROOT, "cursors");
 const TRANSPORT_DIR = path.join(ROOT, "transports");
 const AGENTS_FILE = path.join(ROOT, "agents.json");
+const MODELS_FILE = path.join(ROOT, "agent-models.json");
 const ROOM_FILE = path.join(ROOT, "room.jsonl");
+
+function loadWorkspaceDefaultModels() {
+  const out = { sehui: "human", human: "human" };
+  const mcpPath = path.join(REPO, ".cursor", "mcp.json");
+  if (existsSync(mcpPath)) {
+    try {
+      for (const srv of Object.values(JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers ?? {})) {
+        const id = srv?.env?.AGENT_COORD_BOUND_AGENT?.trim();
+        const model = srv?.env?.AGENT_COORD_MODEL?.trim();
+        if (id && model) out[id] = model;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  const wakeEnvPath = path.join(REPO, ".cursor", "hooks", "coord-wake.local.env");
+  if (existsSync(wakeEnvPath)) {
+    for (const line of readFileSync(wakeEnvPath, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const i = trimmed.indexOf("=");
+      if (i < 1) continue;
+      if (trimmed.slice(0, i).trim() === "COORD_WAKE_MODEL") {
+        const model = trimmed.slice(i + 1).trim();
+        if (model && !out.rico) out.rico = model;
+        break;
+      }
+    }
+  }
+  const tasksPath = path.join(REPO, ".vscode", "tasks.json");
+  if (existsSync(tasksPath)) {
+    try {
+      for (const task of JSON.parse(readFileSync(tasksPath, "utf8")).tasks ?? []) {
+        const id = task?.options?.env?.AGENT_COORD_ID?.trim();
+        const model = task?.options?.env?.COORD_WAKE_MODEL?.trim();
+        if (id && model) out[id] = model;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
+}
+
+const WORKSPACE_DEFAULT_MODELS = loadWorkspaceDefaultModels();
+
+function seedAgentModelsFile() {
+  const current = readJsonSafe(MODELS_FILE, {});
+  let changed = false;
+  for (const [id, model] of Object.entries(WORKSPACE_DEFAULT_MODELS)) {
+    if (!current[id]) {
+      current[id] = model;
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  mkdirSync(path.dirname(MODELS_FILE), { recursive: true });
+  writeFileSync(MODELS_FILE, JSON.stringify(current, null, 2), "utf8");
+}
+
+function resolveDisplayModel(who, m) {
+  if (m?.model) return String(m.model);
+  const fromMap = readJsonSafe(MODELS_FILE, {})[who];
+  if (fromMap) return fromMap;
+  const fromReg = readJsonSafe(AGENTS_FILE, {})[who]?.model;
+  if (fromReg) return fromReg;
+  if (WORKSPACE_DEFAULT_MODELS[who]) return WORKSPACE_DEFAULT_MODELS[who];
+  return "—";
+}
 const ROOMS_DIR = path.join(ROOT, "rooms");
 const ROOMS_FILE = path.join(ROOT, "rooms.json");
 let INBOX_FILE = path.join(INBOX_DIR, `${sanitize(ID)}.jsonl`);
@@ -188,30 +271,19 @@ const AGENT_COLORS = [
 
 // ---------- register and start UI ----------
 
+seedAgentModelsFile();
 await register();
 
-// Visual separator above the prompt — delimits "typing area starts here."
-// Embedded in the prompt string itself so readline owns the redraw; no
-// scroll-region gymnastics needed (those don't survive tmux cleanly).
 const TTY = !!process.stdout.isTTY;
 let COLS = process.stdout.columns || 80;
-const sepLine = () => A.dim("─".repeat(Math.max(10, COLS)));
-
-// `lastLineWasSep` tracks whether the line directly above the cursor is a
-// separator that we own. When true, say() is delivering an async message —
-// it should move up, overwrite the sep with the message, drop a fresh sep,
-// re-prompt with preserved input. When false (e.g. just after the user
-// pressed Enter), say() is printing synchronous command output — it should
-// write naturally and let the post-Enter logic re-establish the input area.
-let lastLineWasSep = false;
+let cachedPrompt = "";
+let liveEmitting = false;
+let drainChain = Promise.resolve();
 
 if (TTY) {
   process.stdout.on("resize", () => {
     COLS = process.stdout.columns || 80;
-    if (typeof rl !== "undefined") {
-      rl.setPrompt(makePrompt());
-      rl.prompt(true);
-    }
+    if (typeof rl !== "undefined") redrawPrompt(true);
   });
 }
 
@@ -220,6 +292,9 @@ const SLASH_COMMANDS = [
   "/clear", "/cls", "/me", "/status", "/away", "/back", "/ignore", "/unignore",
   "/nick", "/join", "/part", "/leave", "/rooms", "/channels", "/topic", "/motd",
   "/rules", "/prune", "/kick", "/wipe-room",
+  "/d", "/d4", "/d6", "/d8", "/d10", "/d12", "/d20", "/d100", "/d%", "/roll", "/dice",
+  "/gm",
+  "/@", "/@all",
   "/help", "/?", "/quit", "/exit",
 ];
 
@@ -322,12 +397,6 @@ await printRecent(3);
   if (e?.topic || e?.motd) showRoomBanner(currentRoom);
 }
 
-// Lay down the first separator. From this point, async incoming messages
-// (via the watcher → drainAndPrint → say) know they can use the cursor
-// games to slot themselves above the prompt.
-process.stdout.write(sepLine() + "\n");
-lastLineWasSep = true;
-
 try { watch(INBOX_FILE, () => void drainAndPrint()); } catch {}
 for (const chan of joinedRooms()) watchRoom(chan);
 try { watch(AGENTS_FILE, () => refreshPrompt()); } catch {}
@@ -346,7 +415,7 @@ function shutdown() {
   try { rl.close(); } catch {}
 }
 
-rl.prompt();
+redrawPrompt(true);
 
 // Serialize line handling: readline fires 'line' events back-to-back for
 // pasted/piped input, and our handlers are async (channel switches, file RMW).
@@ -359,10 +428,7 @@ rl.on("line", (line) => {
 
 async function handleLine(line) {
   const text = line.trim();
-  if (!text) return rl.prompt();
-  // The user's typed-and-submitted line is now in scrollback; it is NOT a
-  // separator slot we own. Sync output from commands should write naturally.
-  lastLineWasSep = false;
+  if (!text) return redrawPrompt(true);
   try {
     if (text === "/quit" || text === "/exit" || text.startsWith("/quit ") || text.startsWith("/exit ")) {
       const msg = text.replace(/^\/(quit|exit)\s*/, "").trim();
@@ -409,8 +475,6 @@ async function handleLine(line) {
       await printWhoami();
     } else if (text === "/clear" || text === "/cls") {
       process.stdout.write("\x1b[2J\x1b[H");
-      // The post-Enter sep write below re-establishes the input area.
-      lastLineWasSep = false;
       printBanner();
     } else if (text.startsWith("/last")) {
       const m = text.match(/^\/last(?:\s+(\d+))?$/);
@@ -419,7 +483,7 @@ async function handleLine(line) {
     } else if (text.startsWith("/me ")) {
       const action = text.slice(4).trim();
       if (!action) say(A.red("usage: /me <action>"));
-      else await sendRoom(`* ${ID} ${action}`);
+      else await sendRoom(`* ${ID} ${action}`, currentRoom, { autoMention: false });
     } else if (text.startsWith("/dm ")) {
       const m = text.match(/^\/dm\s+(\S+)\s+([\s\S]+)$/);
       if (!m) say(A.red("usage: /dm <agentId> <text>"));
@@ -442,20 +506,37 @@ async function handleLine(line) {
       const term = text.slice(6).trim();
       if (!term) say(A.red("usage: /find <text>"));
       else await findInHistory(term);
+    } else if (isDiceHelpCommand(text)) {
+      printDiceHelp();
+    } else if (parseDiceCommand(text)) {
+      await rollDiceCommand(text);
+    } else if (text === "/gm" || text.startsWith("/gm ")) {
+      await handleGmCommand(text);
+    } else if (text === "/@") {
+      setAutoMention(null);
+      say(A.dim("auto-mention off"));
+    } else if (/^\/@all\s*$/i.test(text)) {
+      setAutoMention("all");
+      say(A.dim("auto-mention: @all"));
+    } else if (text.startsWith("/@")) {
+      const target = text.slice(2).trim();
+      if (!/^[A-Za-z0-9._-]+$/i.test(target)) {
+        say(A.red("usage: /@<agentId>  (e.g. /@gemini)"));
+      } else {
+        setAutoMention(target.toLowerCase());
+        say(A.dim(`auto-mention: @${autoMention}`));
+      }
     } else if (text.startsWith("/")) {
       say(A.red(`unknown command: ${text.split(" ")[0]}`) + A.dim("  (try /help)"));
     } else {
-      await sendRoom(text);
+      const inline = parseTrailingDiceCommand(text);
+      if (inline) await rollInlineDiceCommand(inline);
+      else await sendRoom(text);
     }
   } catch (e) {
     say(A.red(`error: ${e?.message ?? e}`));
   }
-  // Re-establish the input area: separator above, prompt below. Sets
-  // lastLineWasSep so any async incoming messages from here on can use the
-  // cursor-game path to slot in above the prompt.
-  process.stdout.write(sepLine() + "\n");
-  lastLineWasSep = true;
-  rl.prompt();
+  redrawPrompt(true);
 }
 
 process.on("SIGINT", async () => {
@@ -519,70 +600,100 @@ function agentColor(id) {
   return AGENT_COLORS[idx];
 }
 
-// Ephemeral suggestion line (the @mention / completion picker). It borrows the
-// separator slot directly above the prompt: drawn there, then wiped back to a
-// real separator on the next keystroke — so it never piles up in scrollback.
+// Ephemeral @mention picker: insert one line directly above the prompt, then
+// delete only that line on the next keystroke (never overwrite chat scrollback).
 function drawHint(content) {
-  if (typeof rl === "undefined" || !lastLineWasSep) return;
-  process.stdout.write("\x1b[1A\r\x1b[2K");  // up to the slot, clear it
-  process.stdout.write(content + "\n");       // draw the hint in place of the sep
-  rl.prompt(true);                            // redraw prompt + preserved input
+  if (typeof rl === "undefined" || liveEmitting) return;
+  clearHint();
+  readline.clearLine(process.stdout, 0);
+  readline.cursorTo(process.stdout, 0);
+  process.stdout.write(content + "\n");
+  rl.prompt(true);
   hintActive = true;
 }
 
 function clearHint() {
-  if (typeof rl === "undefined" || !lastLineWasSep) { hintActive = false; return; }
-  if (!hintActive) return;
-  process.stdout.write("\x1b[1A\r\x1b[2K");  // up to the hint slot, clear it
-  process.stdout.write(sepLine() + "\n");     // restore the separator
+  if (typeof rl === "undefined" || !hintActive) return;
+  process.stdout.write("\x1b[1A\r\x1b[2K");
   rl.prompt(true);
   hintActive = false;
 }
 
-function say(line) {
-  hintActive = false; // any real output reclaims the slot the hint borrowed
-  if (lastLineWasSep) {
-    // Async path: a separator we own sits directly above the prompt; we own
-    // that line. Replace it with the incoming message, drop a new sep, and
-    // re-render the prompt so user input is preserved.
-    process.stdout.write("\x1b[1A\r\x1b[2K");
-    process.stdout.write(line + "\n");
-    process.stdout.write(sepLine() + "\n");
-    if (typeof rl !== "undefined") rl.prompt(true);
-    // lastLineWasSep stays true — there's still a sep above the prompt.
-  } else {
-    // Sync path: no separator above us (startup banner, post-Enter command
-    // output). Just write the line at the current cursor.
-    readline.clearLine(process.stdout, 0);
-    readline.cursorTo(process.stdout, 0);
-    process.stdout.write(line + "\n");
+function redrawPrompt(force = false) {
+  if (typeof rl === "undefined" || liveEmitting) return;
+  const next = makePrompt();
+  rl.setPrompt(next);
+  if (force || next !== cachedPrompt) {
+    cachedPrompt = next;
+    rl.prompt(true);
   }
 }
 
-function makePrompt() {
-  const reg = readJsonSafe(AGENTS_FILE, {});
-  const now = Date.now();
-  const STALE = 5 * 60 * 1000;
-  let online = 0;
-  for (const id of Object.keys(reg)) {
-    if (id === ID) continue;
-    const a = reg[id];
-    const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(id)}.json`), null);
-    const live = marker && marker.pid && pidAlive(marker.pid);
-    if (live || now - a.lastHeartbeat < STALE) online++;
+function emitLive(outputLines) {
+  if (!outputLines.length) return;
+  clearHint();
+  liveEmitting = true;
+  try {
+    if (TTY && typeof rl !== "undefined") {
+      readline.clearLine(process.stdout, 0);
+      readline.cursorTo(process.stdout, 0);
+    }
+    for (const line of outputLines) {
+      process.stdout.write(line + "\n");
+    }
+  } finally {
+    liveEmitting = false;
   }
-  const peers = online === 1 ? "1 peer" : `${online} peers`;
+  redrawPrompt(true);
+}
+
+function say(line) {
+  clearHint();
+  if (TTY && typeof rl !== "undefined") {
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+  }
+  process.stdout.write(line + "\n");
+}
+
+function makePrompt() {
   const chan = A.dim("#") + normalizeRoom(currentRoom);
-  return `${agentColor(ID)(ID)} ${agentColor(currentRoom)(chan)} ${A.dim(`(${peers})`)}${A.dim(">")} `;
+  const mentionHint = autoMention
+    ? A.yellow(`(@${autoMention === "all" ? "all" : autoMention})`)
+    : "";
+  const gap = mentionHint ? " " : "";
+  return `${agentColor(ID)(ID)} ${agentColor(currentRoom)(chan)}${gap}${mentionHint}${A.dim(">")} `;
+}
+
+function gmDisplayId(who, room) {
+  const id = String(who ?? "").trim().toLowerCase();
+  if (!id) return who ?? "?";
+  const gm = getGmAgent(normalizeRoom(room ?? currentRoom));
+  if (gm && id === gm) return `GM:${gm}`;
+  return who;
+}
+
+function setAutoMention(target) {
+  autoMention = target;
+}
+
+function applyAutoMention(text) {
+  if (!autoMention) return text;
+  const t = String(text ?? "");
+  if (!t.trim()) return t;
+  if (autoMention === "all") {
+    if (/@all(?![A-Za-z0-9_-])/i.test(t)) return t;
+    return `@all ${t}`;
+  }
+  if (mentionsAgent(t, autoMention)) return t;
+  return `@${autoMention} ${t}`;
 }
 
 // No-op stubs kept so the exit paths don't reference deleted functions.
 function teardownFooter() {}
 
 function refreshPrompt() {
-  if (typeof rl === "undefined") return;
-  rl.setPrompt(makePrompt());
-  rl.prompt(true);
+  redrawPrompt(false);
 }
 
 function printBanner() {
@@ -602,6 +713,21 @@ function printHelp() {
     ["/dm <agent> <text>",  "send a direct message"],
     ["/msg <#chan> <text>", "post to a channel without switching to it"],
     ["/me <action>",        "post an IRC-style action (* you wave)"],
+    [A.dim("--- auto-mention ---"), ""],
+    ["/@all",               "prefix room messages with @all (wake everyone)"],
+    ["/@<id>",              "prefix with @id (e.g. /@gemini)"],
+    ["/@",                  "turn off auto-mention"],
+    [A.dim("--- dice (TRPG) ---"), ""],
+    ["/d, /d20",            "roll a d20"],
+    ["/d4 … /d100, /d%",    "roll one die (d4 d6 d8 d10 d12 d20 d100)"],
+    ["/2d6+3, /1d20-2",     "NdM ± modifier"],
+    ["/roll <expr>, /r",    "roll expression (/roll 3d8+1)"],
+    ["<text> /d20",         "inline roll at end of a sentence"],
+    ["/dice",               "dice command help"],
+    [A.dim("--- TRPG GM ---"), ""],
+    ["/gm <agentId>",       "set TRPG GM (e.g. /gm gemini)"],
+    ["/gm",                 "show current GM"],
+    ["/gm off",             "clear GM role"],
     ["/status <text>",      "post to the status broadcast channel"],
     [A.dim("--- channels ---"), ""],
     ["/join <#chan>",       "join (and switch to) a channel, creating it if new"],
@@ -667,9 +793,13 @@ async function printRecent(n) {
     );
   }
   const all = [...inbox, ...rooms].sort((a, b) => a.ts - b.ts).slice(-n);
-  if (!all.length) return say(A.dim("(no history)"));
-  say(A.bold(`last ${all.length} message(s):`));
-  for (const m of all) printMsg(m._kind, m, { history: true });
+  if (!all.length) {
+    say(A.dim("(no history)"));
+    return;
+  }
+  const lines = [A.bold(`last ${all.length} message(s):`)];
+  for (const m of all) lines.push(...buildMsgLines(m._kind, m, { history: true }));
+  for (const row of lines) process.stdout.write(row + "\n");
 }
 
 async function withLock(file, fn) {
@@ -1073,15 +1203,64 @@ async function nick(arg) {
   ID = newId;
   INBOX_FILE = path.join(INBOX_DIR, `${sanitize(ID)}.jsonl`);
   CURSOR_FILE = path.join(CURSOR_DIR, `${sanitize(ID)}.json`);
-  SELF_MENTION_RE = new RegExp("@" + ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![A-Za-z0-9._-])");
   for (const chan of joined) await sendSystem(chan, `is now known as ${newId} (was ${oldId})`);
   refreshPrompt();
   say(A.dim("→ you are now ") + agentColor(ID)(ID));
 }
 
-async function sendRoom(text, chan = currentRoom) {
+async function sendRoom(text, chan = currentRoom, { autoMention: useMention = true } = {}) {
   const c = normalizeRoom(chan);
-  await appendMessage(roomFile(c), { from: ID, room: c, text });
+  const body = useMention ? applyAutoMention(text) : text;
+  await appendMessage(roomFile(c), { from: ID, room: c, text: body, model: "human" });
+}
+
+async function sendDiceResult(text, chan = currentRoom) {
+  const c = normalizeRoom(chan);
+  await appendMessage(roomFile(c), {
+    from: ID,
+    room: c,
+    text,
+    model: "human",
+    dice: true,
+    wakeAll: true,
+  });
+}
+
+async function rollDiceCommand(text) {
+  const expr = parseDiceCommand(text);
+  if (!expr) {
+    say(A.red("invalid dice command") + A.dim("  (try /dice)"));
+    return;
+  }
+  try {
+    const result = rollDiceExpr(expr);
+    const line = formatDiceLine(ID, result);
+    await sendDiceResult(line);
+    say(A.dim(`→ ${line}`));
+  } catch (err) {
+    say(A.red(`dice: ${err?.message ?? err}`));
+  }
+}
+
+async function rollInlineDiceCommand({ narrative, expr }) {
+  try {
+    const result = rollDiceExpr(expr);
+    const body = formatCombinedDiceMessage(ID, applyAutoMention(narrative), result);
+    await sendDiceResult(body);
+    say(A.dim(`→ ${body.replace(/\n/g, "\n   ")}`));
+  } catch (err) {
+    say(A.red(`dice: ${err?.message ?? err}`));
+  }
+}
+
+function printDiceHelp() {
+  const std = standardDiceList().map((n) => (n === 100 ? "/d%" : `/d${n}`)).join("  ");
+  say(A.bold("dice:"));
+  say(`  ${A.cyan(std)}`);
+  say(`  ${A.cyan("/d20+5")} ${A.dim("modifier")}  ${A.cyan("/2d6+3")} ${A.dim("multiple dice")}`);
+  say(`  ${A.cyan("/roll 4d6")} ${A.dim("alias")}  ${A.cyan("/d")} ${A.dim("= d20")}`);
+  say(`  ${A.dim("inline:")} ${A.cyan("날렵하게 피한다. /d20")} ${A.dim("→ narrative + roll, one message")}`);
+  say(A.dim("  results broadcast to all agents (@all> in dice line)"));
 }
 
 // Post a system notice (join/part/topic/nick) to a channel.
@@ -1090,34 +1269,71 @@ async function sendSystem(chan, text) {
   await appendMessage(roomFile(c), { from: ID, room: c, text, system: true });
 }
 
+async function handleGmCommand(text) {
+  const arg = text.slice(3).trim().toLowerCase();
+  if (!arg) {
+    const gm = getGmAgent(currentRoom);
+    if (gm) say(`${A.bold("TRPG GM:")} ${agentColor(gm)(`GM:${gm}`)}`);
+    else say(A.dim("no TRPG GM set — /gm <agentId>"));
+    return;
+  }
+  if (arg === "off" || arg === "none" || arg === "clear") {
+    const prev = getGmAgent(currentRoom);
+    clearGmAgent();
+    if (prev) await sendSystem(currentRoom, `cleared TRPG GM (was ${prev})`);
+    say(A.dim("TRPG GM cleared"));
+    refreshPrompt();
+    return;
+  }
+  const reg = readJsonSafe(AGENTS_FILE, {});
+  if (!reg[arg]) {
+    say(A.red(`unknown agent: ${arg}`) + A.dim("  (try /list)"));
+    return;
+  }
+  setGmAgent(arg, { setBy: ID, room: currentRoom });
+  await sendSystem(currentRoom, `set ${arg} as TRPG GM`);
+  say(`${A.green("TRPG GM:")} ${agentColor(arg)(`GM:${arg}`)}`);
+  refreshPrompt();
+}
+
 async function appendMessage(file, partial) {
   await ensureFile(file);
   const entry = { id: randomUUID(), ts: Date.now(), ...partial };
   appendFileSync(file, JSON.stringify(entry) + "\n");
 }
 
-async function drainAndPrint() {
+function drainAndPrint() {
+  drainChain = drainChain
+    .then(() => drainAndPrintOnce())
+    .catch((err) => {
+      console.error("[coord-chat] drain error:", err?.message ?? err);
+    });
+}
+
+async function drainAndPrintOnce() {
   const cursor = readJsonSafe(CURSOR_FILE, {});
   let changed = false;
+  const pending = [];
 
   const inboxAll = readJsonl(INBOX_FILE);
   const inboxOff = cursor.inboxOffset ?? 0;
   for (let i = inboxOff; i < inboxAll.length; i++) {
     const m = inboxAll[i];
-    if (m && m.from !== ID && !ignored.has(m.from)) printMsg("DM", m);
+    if (m && m.from !== ID && !ignored.has(m.from)) pending.push({ kind: "DM", m });
   }
   if (inboxAll.length > inboxOff) {
     cursor.inboxOffset = inboxAll.length;
     changed = true;
   }
 
-  // Drain every joined channel against its own per-channel offset.
   for (const chan of joinedRooms()) {
     const all = readJsonl(roomFile(chan));
     const off = getRoomOffset(cursor, chan);
     for (let i = off; i < all.length; i++) {
       const m = all[i];
-      if (m && m.from !== ID && !ignored.has(m.from)) printMsg("room", { ...m, room: m.room ?? chan });
+      if (m && m.from !== ID && !ignored.has(m.from)) {
+        pending.push({ kind: "room", m: { ...m, room: m.room ?? chan } });
+      }
     }
     if (all.length > off) {
       setRoomOffset(cursor, chan, all.length);
@@ -1125,10 +1341,26 @@ async function drainAndPrint() {
     }
   }
 
-  if (changed) writeJsonAtomic(CURSOR_FILE, cursor);
+  if (pending.length) {
+    const lines = [];
+    for (const { kind, m } of pending) lines.push(...buildMsgLines(kind, m, { history: false }));
+    emitLive(lines);
+  }
+
+  if (changed) await saveCursor(cursor);
 }
 
-function printMsg(kind, m, opts = {}) {
+async function saveCursor(cursor) {
+  try {
+    await withLock(CURSOR_FILE, async () => {
+      writeJsonAtomic(CURSOR_FILE, cursor);
+    });
+  } catch (err) {
+    console.error("[coord-chat] cursor save:", err?.message ?? err);
+  }
+}
+
+function buildMsgLines(kind, m, opts = {}) {
   const who = m.from ?? "?";
   const color = agentColor(who);
   const gutter = color("▎");
@@ -1142,16 +1374,21 @@ function printMsg(kind, m, opts = {}) {
   // System notices (join/part/topic/nick) render as a dim italic one-liner.
   if (m.system) {
     const tag = chanTag ? `#${normalizeRoom(m.room)} ` : "";
-    say("");
-    say(`${prefix}\x1b[2;3m  — ${tag}${who} ${m.text ?? ""} —\x1b[0m`);
+    const row = `${prefix}\x1b[2;3m  — ${tag}${who} ${m.text ?? ""} —\x1b[0m`;
     if (!opts.history) lastBlock = { who: null, ts: m.ts, kind: null };
-    return;
+    return ["", row];
+  }
+
+  if (m.dice) {
+    const row = `${prefix}${chanTag}${m.text ?? ""}`;
+    if (!opts.history) lastBlock = { who: null, ts: m.ts, kind: null };
+    return ["", row];
   }
 
   // Body wraps manually under a continuous gutter — terminal auto-wrap would
   // lose the colored gutter on continuation lines.
-  const prefixW = visibleLength(prefix);
-  const bodyWidth = Math.max(20, COLS - prefixW - visibleLength(`▎ `));
+  const gutterPrefix = `${prefix}${gutter} `;
+  const bodyWidth = Math.max(20, COLS - visibleLength(gutterPrefix));
   const text = (m.text ?? "").split("\n").map(formatBody).join("\n");
   const lines = wrapBody(text, bodyWidth);
 
@@ -1161,22 +1398,30 @@ function printMsg(kind, m, opts = {}) {
     && lastBlock.who === who && lastBlock.kind === kind
     && (m.ts - lastBlock.ts) < GROUP_WINDOW;
 
+  const outputLines = [];
   if (!grouped) {
-    // Header on its own line so the sender is a scannable anchor and the body
-    // always starts at a fixed column. "room" is the default and stays
-    // implied; only DMs get a badge. A ping to the current user brightens the
-    // gutter and adds a ► marker so it pops out of the firehose.
     const pinged = mentionsSelf(m.text);
     const badge = kind === "DM" ? A.bold(A.cyan("DM ")) : "";
     const marker = pinged ? A.bold(A.yellow("► ")) : "";
     const headGutter = pinged ? A.bold(color("▌")) : gutter;
-    const header = `${marker}${badge}${chanTag}${A.bold(color(who))} ${A.dim(`· ${relTime(m.ts)}`)}`;
-    say("");
-    say(`${prefix}${headGutter} ${header}`);
+    const displayWho = gmDisplayId(who, m.room);
+    const header = `${marker}${badge}${chanTag}${A.bold(color(displayWho))} ${A.dim(`· ${resolveDisplayModel(who, m)} · ${relTime(m.ts)}`)}`;
+    outputLines.push("");
+    outputLines.push(`${prefix}${headGutter} ${header}`);
   }
-  for (const line of lines) say(`${prefix}${gutter} ${line}`);
+  for (const line of lines) outputLines.push(`${prefix}${gutter} ${line}`);
 
   if (!opts.history) lastBlock = { who, ts: m.ts, kind };
+  return outputLines;
+}
+
+function printMsg(kind, m, opts = {}) {
+  const outputLines = buildMsgLines(kind, m, opts);
+  if (opts.history) {
+    for (const row of outputLines) process.stdout.write(row + "\n");
+  } else {
+    emitLive(outputLines);
+  }
 }
 
 function visibleLength(s) {
@@ -1344,7 +1589,19 @@ function readJsonSafe(file, fallback) {
 
 function writeJsonAtomic(file, data) {
   mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + ".tmp";
-  writeFileSync(tmp, JSON.stringify(data, null, 2));
-  renameSync(tmp, file);
+  const payload = JSON.stringify(data, null, 2);
+  const tmp = `${file}.tmp.${process.pid}.${randomUUID()}`;
+  writeFileSync(tmp, payload, "utf8");
+  try {
+    renameSync(tmp, file);
+  } catch {
+    try {
+      if (existsSync(tmp)) unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    // Windows / concurrent writers: tmp may vanish before rename — direct write still
+    // advances the cursor so messages are not replayed into the TUI.
+    writeFileSync(file, payload, "utf8");
+  }
 }
