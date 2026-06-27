@@ -179,12 +179,14 @@ function resolveDisplayModel(who, m) {
 }
 const ROOMS_DIR = path.join(ROOT, "rooms");
 const ROOMS_FILE = path.join(ROOT, "rooms.json");
+const HISTORY_DIR = path.join(ROOT, "history");
 let INBOX_FILE = path.join(INBOX_DIR, `${sanitize(ID)}.jsonl`);
 let CURSOR_FILE = path.join(CURSOR_DIR, `${sanitize(ID)}.json`);
 
 mkdirSync(INBOX_DIR, { recursive: true });
 mkdirSync(CURSOR_DIR, { recursive: true });
 mkdirSync(ROOMS_DIR, { recursive: true });
+mkdirSync(HISTORY_DIR, { recursive: true });
 
 // ---------- channels ----------
 // Mirrors src/store.ts: `general` keeps using room.jsonl + the flat roomOffset
@@ -304,10 +306,10 @@ const SLASH_COMMANDS = [
   "/dm", "/msg", "/list", "/who", "/whoami", "/whois", "/last", "/find",
   "/clear", "/cls", "/me", "/status", "/away", "/back", "/ignore", "/unignore",
   "/nick", "/join", "/part", "/leave", "/rooms", "/channels", "/topic", "/motd",
-  "/rules", "/prune", "/kick", "/wipe-room",
+  "/rules", "/prune", "/kick", "/wipe-room", "/rollover",
   "/invite", "/uninvite", "/invited",
   "/d", "/d4", "/d6", "/d8", "/d10", "/d12", "/d20", "/d100", "/d%", "/roll", "/dice",
-  "/gm", "/saveinv",
+  "/gm", "/saveinv", "/inv", "/avil",
   "/@", "/@all",
   "/help", "/?", "/quit", "/exit",
 ];
@@ -339,6 +341,18 @@ function completer(line) {
   } else if (/^\/whois\s/.test(line)) {
     const partial = line.replace(/^\/whois\s+/, "");
     hits = onlineAgentIds().filter((id) => id.startsWith(partial)).map((id) => `/whois ${id} `);
+  } else if (/^\/inv(?:\s|$)/.test(line) && !line.startsWith("/invite")) {
+    const partial = line.replace(/^\/inv\s*/, "");
+    const ids = Object.keys(readJsonSafe(AGENTS_FILE, {})).filter((id) => id.startsWith(partial));
+    hits = ids.map((id) => `/inv ${id} `);
+    if (!partial) hits.unshift("/inv ");
+  } else if (/^\/avil(?:\s|$)/i.test(line)) {
+    const partial = line.replace(/^\/avil\s*/i, "");
+    const names = getAgentAvilities()
+      .map((a) => a.name)
+      .filter((n) => !partial || n.startsWith(partial));
+    hits = names.map((n) => `/avil ${n} `);
+    if (!partial) hits.unshift("/avil ");
   } else {
     // Channel-name completion for the channel-taking commands.
     const cm = line.match(/^\/(join|part|leave|msg)\s+#?(\S*)$/);
@@ -528,6 +542,8 @@ async function handleLine(line) {
       else await kickAgent(target);
     } else if (text === "/wipe-room") {
       await wipeRoom();
+    } else if (text === "/rollover") {
+      await rolloverRoom();
     } else if (text.startsWith("/find ")) {
       const term = text.slice(6).trim();
       if (!term) say(A.red("usage: /find <text>"));
@@ -540,6 +556,10 @@ async function handleLine(line) {
       await handleGmCommand(text);
     } else if (/^\/saveinv(?:\s+\d+)?$/i.test(text)) {
       await handleSaveInvCommand(text);
+    } else if (text === "/inv" || /^\/inv\s+\S+$/i.test(text)) {
+      handleInvCommand(text);
+    } else if (text === "/avil" || text.startsWith("/avil ")) {
+      await handleAvilCommand(text);
     } else if (text === "/@") {
       setAutoMention(null);
       say(A.dim("auto-mention off"));
@@ -757,6 +777,8 @@ function printHelp() {
     ["/gm",                 "show current GM"],
     ["/gm off",               "clear GM role"],
     ["/saveinv [n]",          "ask TRPG GM to sync inventories from last n messages (default 5)"],
+    ["/inv [id]",             "show inventory (yours, or another agent's)"],
+    ["/avil [name]",          "use an avility (Tab completes from agents.json)"],
     ["/status <text>",      "post to the status broadcast channel"],
     [A.dim("--- channels ---"), ""],
     ["/join <#chan>",       "join (and switch to) a channel, creating it if new"],
@@ -783,6 +805,7 @@ function printHelp() {
     ["/prune [days]",       "drop messages older than N days (default 7)"],
     ["/kick <agent>",       "unregister an agent + kill their pusher"],
     ["/wipe-room",          "truncate the current channel (destructive)"],
+    ["/rollover",           "archive room.jsonl, start fresh log, reset cursors + history/"],
     [A.dim("---"),          ""],
     ["/help, /?",           "this list"],
     ["/quit [msg], /exit",  "unregister and leave"],
@@ -863,6 +886,7 @@ async function register() {
       lastHeartbeat: now,
       away: existing?.away,
       inventory: existing?.inventory,
+      avilities: existing?.avilities,
     };
     writeJsonAtomic(AGENTS_FILE, reg);
   });
@@ -950,6 +974,59 @@ async function wipeRoom() {
   // of the (now empty) file rather than pointing past EOF.
   resetRoomOffsets(chan);
   say(A.dim(`→ #${chan} wiped (channel cursors reset)`));
+}
+
+function rolloverStamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}_${pad(d.getMinutes())}_${pad(d.getSeconds())}`;
+}
+
+function clearHistoryDir() {
+  if (!existsSync(HISTORY_DIR)) return 0;
+  let removed = 0;
+  for (const name of readdirSync(HISTORY_DIR)) {
+    try {
+      unlinkSync(path.join(HISTORY_DIR, name));
+      removed++;
+    } catch {
+      /* ignore */
+    }
+  }
+  return removed;
+}
+
+async function rolloverRoom() {
+  await ensureFile(ROOM_FILE);
+  const msgCount = readJsonl(ROOM_FILE).length;
+  const stamp = rolloverStamp();
+  let archivedName = `room_${stamp}.jsonl`;
+  let archivedPath = path.join(ROOT, archivedName);
+  if (existsSync(archivedPath)) {
+    archivedName = `room_${stamp}_${randomUUID().slice(0, 8)}.jsonl`;
+    archivedPath = path.join(ROOT, archivedName);
+  }
+
+  renameSync(ROOM_FILE, archivedPath);
+  writeFileSync(ROOM_FILE, "", "utf8");
+
+  watchedRooms.delete(ROOM_FILE);
+  try {
+    watchRoom(DEFAULT_ROOM);
+  } catch {
+    /* non-fatal */
+  }
+
+  resetRoomOffsets(DEFAULT_ROOM);
+  const historyRemoved = clearHistoryDir();
+  lastBlock = { who: null, ts: 0, kind: null };
+
+  await sendSystem(DEFAULT_ROOM, `room log rolled over (${msgCount} messages → ${archivedName})`);
+  say(
+    A.dim(`→ rolled over #general: ${archivedName}`) +
+      A.dim(` (${msgCount} message${msgCount === 1 ? "" : "s"} archived)`),
+  );
+  say(A.dim(`  cursors reset (roomOffset=0), history/ cleared (${historyRemoved} file${historyRemoved === 1 ? "" : "s"})`));
 }
 
 // Walk every cursor file and shift offsets down by the per-channel removed
@@ -1171,6 +1248,7 @@ async function registerInvitedAgent(agentId, model) {
       registeredAt: existing?.registeredAt ?? now,
       lastHeartbeat: now,
       inventory: existing?.inventory,
+      avilities: existing?.avilities,
     };
     writeJsonAtomic(AGENTS_FILE, reg);
   });
@@ -1525,6 +1603,95 @@ async function handleSaveInvCommand(text) {
     model: "human",
   });
   say(A.dim(`→ saveinv requested from ${agentColor(gm)(`GM:${gm}`)} (${recent.length} messages)`));
+}
+
+function handleInvCommand(text) {
+  const arg = text.slice(4).trim().toLowerCase();
+  const target = arg || ID;
+  printInventory(target);
+}
+
+function printInventory(target) {
+  const reg = readJsonSafe(AGENTS_FILE, {});
+  const a = reg[target];
+  if (!a) {
+    say(A.red(`no such agent: ${target}`) + A.dim("  (try /list)"));
+    return;
+  }
+  const items = Array.isArray(a.inventory) ? a.inventory : [];
+  say(
+    A.bold("inventory ") +
+      agentColor(target)(target) +
+      A.dim(` (${items.length} item${items.length === 1 ? "" : "s"})`),
+  );
+  if (!items.length) {
+    say(A.dim("  (empty)"));
+    return;
+  }
+  for (const item of items) {
+    const qty = item?.quantity ?? 0;
+    const name = String(item?.name ?? "?");
+    const note = item?.note ? A.dim(` — ${item.note}`) : "";
+    say(`  ${A.cyan(String(qty).padStart(4))}  ${name}${note}`);
+  }
+}
+
+function getAgentAvilities(agentId = ID) {
+  const a = readJsonSafe(AGENTS_FILE, {})[agentId];
+  return Array.isArray(a?.avilities) ? a.avilities : [];
+}
+
+function resolveAvilityInput(input) {
+  const list = getAgentAvilities();
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) return { ability: null, narrative: "" };
+  const sorted = [...list].sort((a, b) => String(b.name).length - String(a.name).length);
+  for (const ab of sorted) {
+    const name = String(ab.name ?? "");
+    if (trimmed === name) return { ability: ab, narrative: "" };
+    if (trimmed.startsWith(`${name} `)) {
+      return { ability: ab, narrative: trimmed.slice(name.length).trim() };
+    }
+  }
+  return { ability: null, narrative: trimmed };
+}
+
+function printAvilities(target = ID) {
+  const list = getAgentAvilities(target);
+  say(
+    A.bold("avilities ") +
+      agentColor(target)(target) +
+      A.dim(` (${list.length} skill${list.length === 1 ? "" : "s"})`),
+  );
+  if (!list.length) {
+    say(A.dim("  (none)"));
+    return;
+  }
+  for (const ab of list) {
+    const lvl = ab.level ?? "?";
+    const desc = ab.desc ? A.dim(` — ${ab.desc}`) : "";
+    say(`  ${A.cyan(`Lv.${lvl}`.padEnd(5))}  ${ab.name}${desc}`);
+  }
+}
+
+async function handleAvilCommand(text) {
+  const rest = text.slice(5).trim();
+  if (!rest) {
+    printAvilities(ID);
+    return;
+  }
+  const { ability, narrative } = resolveAvilityInput(rest);
+  if (!ability) {
+    say(A.red(`unknown avility: ${rest.split(/\s/)[0]}`) + A.dim("  (try /avil)"));
+    return;
+  }
+  const lvl = ability.level ?? "?";
+  const action = narrative || ability.desc || "";
+  const line = action
+    ? `[${ability.name} Lv.${lvl}] ${action}`
+    : `[${ability.name} Lv.${lvl}]`;
+  await sendRoom(line, currentRoom);
+  say(A.dim(`→ ${line}`));
 }
 
 async function appendMessage(file, partial) {
