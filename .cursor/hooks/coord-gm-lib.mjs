@@ -2,12 +2,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-const COORD_DIR =
-  process.env.AGENT_COORD_DIR ||
-  process.env.CLAUDE_COORD_DIR ||
-  path.join(homedir(), "agent-coord");
-const GM_FILE = path.join(COORD_DIR, "trpg-gm.json");
+const DEFAULT_ROOM = "general";
 
+function coordDir() {
+  return (
+    process.env.AGENT_COORD_DIR ||
+    process.env.CLAUDE_COORD_DIR ||
+    path.join(homedir(), "agent-coord")
+  );
+}
+
+function gmFile() {
+  return path.join(coordDir(), "trpg-gm.json");
+}
+
+function agentsFile() {
+  return path.join(coordDir(), "agents.json");
+}
+
+export const GM_CONTEXT_DEFAULT = 5;
 export const GM_INSTRUCTIONS =
   "You are the TRPG Game Master (GM) for this coord-chat session. " +
   "Narrate vividly: scene, atmosphere, sensory detail, NPC voices, stakes, and consequences. " +
@@ -16,9 +29,10 @@ export const GM_INSTRUCTIONS =
   "Avoid meta talk about being an AI or following instructions.";
 
 export function loadGmState() {
-  if (!existsSync(GM_FILE)) return null;
+  const file = gmFile();
+  if (!existsSync(file)) return null;
   try {
-    const s = JSON.parse(readFileSync(GM_FILE, "utf8"));
+    const s = JSON.parse(readFileSync(file, "utf8"));
     const agentId = String(s.agentId ?? "").trim().toLowerCase();
     if (!agentId) return null;
     return {
@@ -41,14 +55,15 @@ export function setGmAgent(agentId, { setBy, room = "general" } = {}) {
     setBy: setBy ?? null,
     setAt: Date.now(),
   };
-  mkdirSync(path.dirname(GM_FILE), { recursive: true });
-  writeFileSync(GM_FILE, JSON.stringify(state, null, 2), "utf8");
+  mkdirSync(path.dirname(gmFile()), { recursive: true });
+  writeFileSync(gmFile(), JSON.stringify(state, null, 2), "utf8");
   return state;
 }
 
 export function clearGmAgent() {
   try {
-    if (existsSync(GM_FILE)) writeFileSync(GM_FILE, "{}\n", "utf8");
+    const file = gmFile();
+    if (existsSync(file)) writeFileSync(file, "{}\n", "utf8");
   } catch {
     /* ignore */
   }
@@ -75,6 +90,102 @@ export function gmWakeReplyTail(agentId) {
     `${GM_INSTRUCTIONS} ` +
     `Do NOT call read_messages. Do NOT artificially shorten replies.`
   );
+}
+
+export function saveInvWakeAddendum(agentId, batch) {
+  if (!isGmAgent(agentId)) return "";
+  if (!Array.isArray(batch) || !batch.some((m) => /\[saveinv\]/i.test(m.text ?? ""))) return "";
+  return (
+    "This is a /saveinv request: compare recent chat to current inventories, then call " +
+    "get_agent_inventories and batch_set_agent_inventories to persist updates for every " +
+    "participant whose inventory changed. Reply with a summary of what you saved. "
+  );
+}
+
+export function conWakeAddendum(agentId, batch) {
+  if (!isGmAgent(agentId)) return "";
+  if (!Array.isArray(batch) || !batch.some((m) => /\[con\]/i.test(m.text ?? ""))) return "";
+  return (
+    "This is a /con request: continue the TRPG story — narrate the next scene beat from where chat left off. "
+  );
+}
+
+function roomJsonlPath(room) {
+  const c = normalizeRoom(room);
+  const root = coordDir();
+  return c === DEFAULT_ROOM
+    ? path.join(root, "room.jsonl")
+    : path.join(root, "rooms", `${c}.jsonl`);
+}
+
+function readJsonl(file) {
+  if (!existsSync(file)) return [];
+  try {
+    return readFileSync(file, "utf8")
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+
+export function isGmSlashRequestMessage(msg) {
+  if (!msg?.text) return false;
+  const header = String(msg.text).split(/\n\s*Recent #/i)[0];
+  return /^\s*@[A-Za-z0-9._-]+\s+\[(?:con|saveinv)\]/i.test(header.trim());
+}
+
+export function readRecentRoomMessages(room, limit, { excludeIds = [] } = {}) {
+  const skip = new Set(excludeIds.filter(Boolean));
+  const n = Math.max(1, parseInt(String(limit ?? ""), 10) || GM_CONTEXT_DEFAULT);
+  return readJsonl(roomJsonlPath(room))
+    .filter(
+      (m) =>
+        !m.system &&
+        !m.control &&
+        !skip.has(m.id) &&
+        !isGmSlashRequestMessage(m),
+    )
+    .slice(-n);
+}
+
+export function loadAgentInventories() {
+  const file = agentsFile();
+  if (!existsSync(file)) return {};
+  try {
+    const reg = JSON.parse(readFileSync(file, "utf8"));
+    const out = {};
+    for (const [id, entry] of Object.entries(reg)) {
+      out[id] = entry?.inventory ?? [];
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Server-side context for /con and /saveinv (not posted to the room). */
+export function buildGmSlashContext(agentId, batch) {
+  if (!isGmAgent(agentId) || !Array.isArray(batch) || batch.length === 0) return "";
+
+  const conMsg = batch.find((m) => /\[con\]/i.test(m.text ?? ""));
+  const saveMsg = batch.find((m) => /\[saveinv\]/i.test(m.text ?? ""));
+  if (!conMsg && !saveMsg) return "";
+
+  const anchor = conMsg ?? saveMsg;
+  const room = normalizeRoom(anchor.room ?? anchor.chan?.replace(/^#/, "") ?? "general");
+  const limit = anchor.contextLimit ?? GM_CONTEXT_DEFAULT;
+  const excludeIds = batch.map((m) => m.id);
+  const recent = readRecentRoomMessages(room, limit, { excludeIds });
+  const historyLines = recent.map((m) => `${m.from}: ${m.text}`).join("\n") || "(none)";
+
+  const parts = [];
+  if (saveMsg) {
+    parts.push(`Current inventories:\n${JSON.stringify(loadAgentInventories(), null, 2)}`);
+  }
+  parts.push(`Recent #${room} messages (last ${recent.length}):\n${historyLines}`);
+  return parts.join("\n\n");
 }
 
 export function gmSessionContextAddendum(agentId) {

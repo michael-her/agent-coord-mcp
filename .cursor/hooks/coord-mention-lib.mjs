@@ -1,6 +1,6 @@
 /** @mention detection for coord wake / hook followup (@rico, @gemini, @all, …). */
 
-import { getGmAgent } from "./coord-gm-lib.mjs";
+import { getGmAgent, isGmSlashRequestMessage } from "./coord-gm-lib.mjs";
 
 /** Chars that continue an agent id (not sentence punctuation). Hyphen kept so @rico ≠ @rico-backend. */
 const MENTION_ID_CONTINUATION = /[A-Za-z0-9_-]/;
@@ -59,6 +59,14 @@ function normalizeRoom(name) {
 }
 
 /**
+ * GM-only slash requests (/con, /saveinv) embed recent chat for context.
+ * @mentions inside that history must not wake other agents.
+ */
+export function isGmSlashRequest(msg) {
+  return isGmSlashRequestMessage(msg);
+}
+
+/**
  * Whether this coord message should wake / follow up the given agent.
  * Room posts require @agentId or @all in narrative; per-agent inbox (DM) always qualifies.
  * Human dice (wakeAll) wakes every listener. Agent dice auto-wakes the TRPG GM only.
@@ -70,6 +78,11 @@ export function shouldWakeForCoordMessage(msg, agentId, { isDm = false, room = "
   if (msg.wakeAll) return msg.text != null;
   if (isDm) return msg.text != null;
   if (msg.text == null) return false;
+
+  if (isGmSlashRequest(msg)) {
+    const gm = getGmAgent(normalizeRoom(room));
+    return Boolean(gm && agentId === gm);
+  }
 
   if (isAgentDiceMessage(msg)) {
     const gm = getGmAgent(normalizeRoom(room));

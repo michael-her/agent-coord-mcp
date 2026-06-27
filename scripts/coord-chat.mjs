@@ -309,7 +309,7 @@ const SLASH_COMMANDS = [
   "/rules", "/prune", "/kick", "/wipe-room", "/rollover",
   "/invite", "/uninvite", "/invited",
   "/d", "/d4", "/d6", "/d8", "/d10", "/d12", "/d20", "/d100", "/d%", "/roll", "/dice",
-  "/gm", "/saveinv", "/inv", "/avil",
+  "/gm", "/saveinv", "/con", "/inv", "/avil",
   "/@", "/@all",
   "/help", "/?", "/quit", "/exit",
 ];
@@ -556,6 +556,8 @@ async function handleLine(line) {
       await handleGmCommand(text);
     } else if (/^\/saveinv(?:\s+\d+)?$/i.test(text)) {
       await handleSaveInvCommand(text);
+    } else if (/^\/con(?:\s+\d+)?$/i.test(text)) {
+      await handleConCommand(text);
     } else if (text === "/inv" || /^\/inv\s+\S+$/i.test(text)) {
       handleInvCommand(text);
     } else if (text === "/avil" || text.startsWith("/avil ")) {
@@ -777,6 +779,7 @@ function printHelp() {
     ["/gm",                 "show current GM"],
     ["/gm off",               "clear GM role"],
     ["/saveinv [n]",          "ask TRPG GM to sync inventories from last n messages (default 5)"],
+    ["/con [n]",              "ask TRPG GM to narrate the next scene (default 5 msgs context)"],
     ["/inv [id]",             "show inventory (yours, or another agent's)"],
     ["/avil [name]",          "use an avility (Tab completes from agents.json)"],
     ["/status <text>",      "post to the status broadcast channel"],
@@ -1560,6 +1563,7 @@ async function handleGmCommand(text) {
 }
 
 const SAVEINV_DEFAULT_MESSAGES = 5;
+const CON_DEFAULT_MESSAGES = 5;
 
 async function handleSaveInvCommand(text) {
   const m = text.match(/^\/saveinv(?:\s+(\d+))?$/i);
@@ -1573,27 +1577,11 @@ async function handleSaveInvCommand(text) {
     say(A.red("no TRPG GM set") + A.dim("  (use /gm <agentId> first)"));
     return;
   }
-  const reg = readJsonSafe(AGENTS_FILE, {});
-  const inventories = {};
-  for (const [id, entry] of Object.entries(reg)) {
-    inventories[id] = entry.inventory ?? [];
-  }
-  const recent = readJsonl(roomFile(currentRoom))
-    .filter((msg) => !msg.system && !msg.control)
-    .slice(-limit);
-  const historyLines = recent.map((msg) => `${msg.from}: ${msg.text}`).join("\n");
   const body = [
     `@${gm} [saveinv]`,
     "Review the recent chat and update each participant's inventory in agents.json.",
     "Use MCP: get_agent_inventories (confirm state), then batch_set_agent_inventories (save all changes).",
     "Track item gains, losses, trades, and spent consumables from the narrative.",
-    "",
-    "Current inventories:",
-    JSON.stringify(inventories, null, 2),
-    "",
-    `Recent #${currentRoom} messages (last ${recent.length}):`,
-    historyLines || "(none)",
-    "",
     "Reply with a concise summary of inventory changes after saving.",
   ].join("\n");
   await appendMessage(roomFile(currentRoom), {
@@ -1601,8 +1589,32 @@ async function handleSaveInvCommand(text) {
     room: currentRoom,
     text: body,
     model: "human",
+    contextLimit: limit,
   });
-  say(A.dim(`→ saveinv requested from ${agentColor(gm)(`GM:${gm}`)} (${recent.length} messages)`));
+  say(A.dim(`→ saveinv requested from ${agentColor(gm)(`GM:${gm}`)} (${limit} msgs context)`));
+}
+
+async function handleConCommand(text) {
+  const m = text.match(/^\/con(?:\s+(\d+))?$/i);
+  const limit = m?.[1] ? parseInt(m[1], 10) : CON_DEFAULT_MESSAGES;
+  if (!Number.isFinite(limit) || limit < 1) {
+    say(A.red("usage: /con [messageCount]"));
+    return;
+  }
+  const gm = getGmAgent(currentRoom);
+  if (!gm) {
+    say(A.red("no TRPG GM set") + A.dim("  (use /gm <agentId> first)"));
+    return;
+  }
+  const body = `@${gm} [con]\nContinue the TRPG narrative — narrate the next scene beat from where the story left off.`;
+  await appendMessage(roomFile(currentRoom), {
+    from: ID,
+    room: currentRoom,
+    text: body,
+    model: "human",
+    contextLimit: limit,
+  });
+  say(A.dim(`→ continue requested from ${agentColor(gm)(`GM:${gm}`)} (${limit} msgs context)`));
 }
 
 function handleInvCommand(text) {

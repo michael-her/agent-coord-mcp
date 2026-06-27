@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { setGmAgent, clearGmAgent } from "../.cursor/hooks/coord-gm-lib.mjs";
 import {
+  isGmSlashRequest,
   mentionsAgent,
   shouldWakeForCoordMessage,
   wakeMentionText,
@@ -125,4 +126,34 @@ test("shouldWakeForCoordMessage: human wakeAll dice still wakes everyone", () =>
     ),
     true,
   );
+});
+
+test("shouldWakeForCoordMessage: /con and /saveinv wake TRPG GM only", () => {
+  const conMsg = {
+    from: "sehui",
+    text: "@johns [con]\nContinue the TRPG narrative.",
+  };
+  const saveMsg = {
+    from: "sehui",
+    text: "@johns [saveinv]\nSync inventories.",
+  };
+  const legacyConMsg = {
+    from: "sehui",
+    text: [
+      "@johns [con]",
+      "Continue the TRPG narrative.",
+      "",
+      "Recent #general messages (last 5):",
+      "rico: @rico check the door",
+    ].join("\n"),
+  };
+  withGm("johns", () => {
+    assert.equal(shouldWakeForCoordMessage(conMsg, "johns", { room: "general" }), true);
+    assert.equal(shouldWakeForCoordMessage(conMsg, "rico", { room: "general" }), false);
+    assert.equal(shouldWakeForCoordMessage(saveMsg, "johns", { room: "general" }), true);
+    assert.equal(shouldWakeForCoordMessage(saveMsg, "rico", { room: "general" }), false);
+    assert.equal(shouldWakeForCoordMessage(legacyConMsg, "rico", { room: "general" }), false);
+    assert.equal(isGmSlashRequest(conMsg), true);
+    assert.equal(isGmSlashRequest({ from: "sehui", text: "@rico normal mention" }), false);
+  });
 });

@@ -17,16 +17,18 @@ import {
   AGENT_ID,
   PROJECT,
   MODEL,
-  SESSION_IDLE_MS,
   buildPrompt,
   filterBatch,
   hookLog,
   isProcessAlive,
   isRecoverableWakeError,
   isSessionStaleError,
+  isWakeTimeoutError,
   loadLocalEnv,
   mcpServers,
   QUEUE_FILE,
+  SESSION_IDLE_MS,
+  waitForRun,
 } from "./coord-wake-lib.mjs";
 import { saveAgentModel } from "./coord-agent-lib.mjs";
 import { clearAgentBusy, releaseAgentBusy, setAgentBusy } from "./coord-busy-lib.mjs";
@@ -111,6 +113,14 @@ try {
 }
 setInterval(drain, 400);
 
+// Drop stale warm sessions during idle so the first post-idle wake does not hang.
+setInterval(() => {
+  if (processing || !agent) return;
+  const idleMs = Date.now() - lastSuccessAt;
+  if (idleMs < SESSION_IDLE_MS) return;
+  void resetAgent("idle timeout (proactive)", { discardSavedId: true });
+}, 60_000);
+
 process.on("SIGINT", () => {
   releaseAgentBusy(AGENT_ID, "SIGINT");
   console.log("\n[coord-wake-daemon] stopped");
@@ -173,6 +183,10 @@ async function runWakeBatch(batch) {
   } catch (err) {
     const msg = err?.message ?? String(err);
     hookLog(`coord-wake failed: ${msg} ${Date.now() - t0}ms`);
+    if (isWakeTimeoutError(msg)) {
+      await retryWakeBatch(batch, "run timeout", t0, { force: true, discardSavedId: true });
+      return;
+    }
     if (isRecoverableWakeError(msg)) {
       await retryWakeBatch(batch, "recoverable error", t0, { force: true, discardSavedId: false });
       return;
@@ -235,7 +249,7 @@ async function sendWakeBatch(batch, force) {
     mcpServers: mcpServers(),
     local: { force },
   });
-  return await run.wait();
+  return await waitForRun(run);
 }
 
 async function refreshAgentIfIdle() {

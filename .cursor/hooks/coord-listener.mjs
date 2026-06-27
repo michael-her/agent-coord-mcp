@@ -179,6 +179,7 @@ function scheduleWake(msg, chanLabel) {
     text: String(msg.text ?? ""),
     wakeAll: msg.wakeAll === true,
     dice: msg.dice === true,
+    contextLimit: msg.contextLimit,
   });
   requestWakeFlush();
 }

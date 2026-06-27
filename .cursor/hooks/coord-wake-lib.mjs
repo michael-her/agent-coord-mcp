@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { shouldWakeForCoordMessage } from "./coord-mention-lib.mjs";
-import { gmWakeReplyTail, isGmAgent } from "./coord-gm-lib.mjs";
+import { gmWakeReplyTail, conWakeAddendum, saveInvWakeAddendum, buildGmSlashContext } from "./coord-gm-lib.mjs";
 import { dedupeWakeItems } from "./coord-wake-claim-lib.mjs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -69,16 +69,14 @@ export function mcpServers() {
 export function buildPrompt(batch) {
   const lines = batch.map((m) => `${m.chan} ${m.from}: ${m.text}`).join("\n");
   const reply = gmWakeReplyTail(AGENT_ID);
-  const saveInv =
-    isGmAgent(AGENT_ID) && batch.some((m) => /\[saveinv\]/i.test(m.text ?? ""));
-  const saveInvTail = saveInv
-    ? "This is a /saveinv request: compare recent chat to current inventories, then call " +
-      "get_agent_inventories and batch_set_agent_inventories to persist updates for every " +
-      "participant whose inventory changed. Reply with a summary of what you saved. "
-    : "";
+  const saveInvTail = saveInvWakeAddendum(AGENT_ID, batch);
+  const conTail = conWakeAddendum(AGENT_ID, batch);
+  const slashCtx = buildGmSlashContext(AGENT_ID, batch);
   return (
     `coord-chat message(s):\n${lines}\n\n` +
+    (slashCtx ? `${slashCtx}\n\n` : "") +
     `${saveInvTail}` +
+    `${conTail}` +
     `Reply on the matching channel via agent-coord MCP send_message ` +
     `(from:"${AGENT_ID}", room:"general", text:"..."). Model is stamped automatically. ` +
     `${reply}`
@@ -120,10 +118,18 @@ export function queueBatch(batch) {
 /** Warm-agent idle before proactive session refresh (default 90 min). */
 export const SESSION_IDLE_MS = parseInt(process.env.COORD_WAKE_SESSION_IDLE_MS || "", 10) || 90 * 60 * 1000;
 
+/** Max wait for a single SDK run in wake-daemon (default 3 min, matches listener). */
+export const RUN_TIMEOUT_MS =
+  parseInt(process.env.COORD_WAKE_RUN_TIMEOUT_MS || "", 10) ||
+  parseInt(process.env.COORD_WAKE_TIMEOUT_MS || "", 10) ||
+  180_000;
+
 const SESSION_STALE_RE =
   /unauthenticated|unauthorized|not authenticated|invalid session|session expired|token expired|expired session|authentication failed/i;
 
 const RECOVERABLE_WAKE_RE = /active run|aborted|canceled|SQLITE_CONSTRAINT/i;
+
+const WAKE_TIMEOUT_RE = /wake run timeout/i;
 
 export function isSessionStaleError(msg) {
   return SESSION_STALE_RE.test(String(msg ?? ""));
@@ -131,4 +137,33 @@ export function isSessionStaleError(msg) {
 
 export function isRecoverableWakeError(msg) {
   return RECOVERABLE_WAKE_RE.test(String(msg ?? ""));
+}
+
+export function isWakeTimeoutError(msg) {
+  return WAKE_TIMEOUT_RE.test(String(msg ?? ""));
+}
+
+/** Race run.wait() against a deadline; cancel the run on timeout. */
+export async function waitForRun(run, timeoutMs = RUN_TIMEOUT_MS) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`wake run timeout after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([run.wait(), timeout]);
+  } catch (err) {
+    if (isWakeTimeoutError(err?.message ?? err)) {
+      try {
+        if (run.supports?.("cancel")) await run.cancel();
+      } catch {
+        /* ignore */
+      }
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
