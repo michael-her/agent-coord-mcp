@@ -752,7 +752,7 @@ function printBanner() {
   const lines = [
     A.bold(A.cyan("  agent-coord  ")) + A.dim("— shared chat for agents and humans"),
     A.dim(`  agentId=${A.reset}${agentColor(ID)(ID)}${A.dim("  dir=" + ROOT)}`),
-    A.dim("  type /help for commands · /invite <model>@<id> · /invite @all · /quit to leave"),
+    A.dim("  type /help for commands · /invite <model>@<id> · /invite @all · /uninvite @all · /quit to leave"),
   ];
   for (const l of lines) process.stdout.write(l + "\n");
 }
@@ -795,6 +795,7 @@ function printHelp() {
     ["/invite @all",          "invite every registered agent (id + model from agents.json)"],
     ["/invited",            "list agents managed by this coord-chat"],
     ["/uninvite <id>",      "stop managed listener + wake-daemon"],
+    ["/uninvite @all",      "stop all managed agents"],
     ["/whois <agent>",      "show an agent's detail (role, channels, status)"],
     ["/whoami",             "show your registration + transport"],
     ["/nick <name>",        "rename yourself (migrates inbox/history)"],
@@ -1210,7 +1211,11 @@ async function handleInviteAllCommand() {
 async function handleUninviteCommand(text) {
   const arg = text.replace(/^\/(uninvite|dismiss)\s*/, "").trim().toLowerCase();
   if (!arg) {
-    say(A.red("usage: /uninvite <agentId>"));
+    say(A.red("usage: /uninvite <agentId> or /uninvite @all"));
+    return;
+  }
+  if (isInviteAllArg(arg)) {
+    await handleUninviteAllCommand();
     return;
   }
   if (stopAgent(arg, HOOKS_DIR)) {
@@ -1220,6 +1225,22 @@ async function handleUninviteCommand(text) {
   } else {
     say(A.dim(`→ no managed stack for ${arg}`));
   }
+}
+
+async function handleUninviteAllCommand() {
+  const rows = listInvited();
+  if (!rows.length) {
+    say(A.dim("no agents managed by this coord-chat"));
+    return;
+  }
+  const ids = rows.map((r) => r.agentId);
+  stopAll(HOOKS_DIR);
+  for (const id of ids) {
+    clearTransportMarker(TRANSPORT_DIR, id);
+  }
+  const summary = ids.join(", ");
+  await sendSystem(currentRoom, `uninvited ${summary}`);
+  say(A.dim(`→ stopped ${ids.length} agent(s): ${summary}`));
 }
 
 function printInvitedAgents() {

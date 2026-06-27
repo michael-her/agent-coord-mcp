@@ -15,3 +15,7 @@ LIVE_STATE_*.md
 .cursor/hooks/coord-wake-agent-id*.txt
 .cursor/hooks/_test-batch.json
 .cursor/hooks/*.local.env
+
+campaigns/
+chafa/vcpkg_installed/
+chafa/x64/

@@ -20,7 +20,7 @@ test("parseInviteSpec accepts model@id", () => {
   assert.equal(parseInviteSpec("@gemini"), null);
 });
 
-test("isInviteAllArg recognizes bulk invite", () => {
+test("isInviteAllArg recognizes bulk invite and uninvite", () => {
   assert.equal(isInviteAllArg("@all"), true);
   assert.equal(isInviteAllArg("all"), true);
   assert.equal(isInviteAllArg("@ALL"), true);
