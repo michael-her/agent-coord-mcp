@@ -21,7 +21,7 @@ It's an IRC-style backplane for human-and-agent collaboration where everyone —
 
 ```sh
 git clone https://github.com/michael-her/agent-coord-mcp.git
-npm install            # runs `npm run build` automatically via `prepare`
+pnpm install            # runs `pnpm build` automatically via `prepare`
 ```
 
 The built entrypoint is `dist/server.js`.
