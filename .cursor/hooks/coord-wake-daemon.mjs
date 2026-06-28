@@ -38,13 +38,15 @@ import {
   dedupeWakeItems,
   filterUnclaimed,
 } from "./coord-wake-claim-lib.mjs";
+import { hooksLogPath, migrateLegacyWakeLogs } from "./coord-wake-logs-lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PID_FILE = path.join(__dirname, `coord-wake-daemon-${AGENT_ID}.pid`);
-const AGENT_ID_FILE = path.join(__dirname, `coord-wake-agent-id-${AGENT_ID}.txt`);
-const STATE_FILE = path.join(__dirname, `coord-wake-daemon-state-${AGENT_ID}.json`);
+const AGENT_ID_FILE = hooksLogPath(`coord-wake-agent-id-${AGENT_ID}.txt`);
+const STATE_FILE = hooksLogPath(`coord-wake-daemon-state-${AGENT_ID}.json`);
 
 loadLocalEnv();
+migrateLegacyWakeLogs(AGENT_ID);
 saveAgentModel(AGENT_ID, MODEL);
 
 const apiKey = process.env.CURSOR_API_KEY?.trim();

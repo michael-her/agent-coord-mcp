@@ -1,15 +1,11 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { isProcessAlive } from "./coord-wake-lib.mjs";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
+import { hooksLogPath } from "./coord-wake-logs-lib.mjs";
 const BUSY_MAX_MS = parseInt(process.env.COORD_WAKE_BUSY_MAX_MS || "", 10) || 10 * 60 * 1000;
 
 export function busyFile(agentId) {
-  return path.join(__dirname, `coord-wake-busy-${agentId}.json`);
+  return hooksLogPath(`coord-wake-busy-${agentId}.json`);
 }
 
 export function setAgentBusy(agentId, meta = {}) {

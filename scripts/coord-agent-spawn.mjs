@@ -111,6 +111,12 @@ export function killStaleHookProcesses(hooksDir, agentId) {
       /* ignore */
     }
   }
+  const savedAgent = path.join(hooksDir, "logs", `coord-wake-agent-id-${id}.txt`);
+  try {
+    if (existsSync(savedAgent)) unlinkSync(savedAgent);
+  } catch {
+    /* ignore */
+  }
 }
 
 function baseChildEnv({ agentId, coordDir, projectDir, model }) {

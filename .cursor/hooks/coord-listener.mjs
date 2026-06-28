@@ -25,9 +25,11 @@ import {
   advanceAgentCursorForWake,
   dedupeWakeItems,
 } from "./coord-wake-claim-lib.mjs";
+import { hooksLogPath, migrateLegacyWakeLogs } from "./coord-wake-logs-lib.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENT_ID = process.env.AGENT_COORD_ID || "rico";
+migrateLegacyWakeLogs(AGENT_ID);
 const ROOT =
   process.env.AGENT_COORD_DIR ||
   process.env.CLAUDE_COORD_DIR ||
@@ -230,7 +232,7 @@ function flushWakeBatch() {
     }
 
     hookLog(`coord-wake schedule (${batch.length} msg)`);
-    const batchFile = path.join(__dirname, `.wake-batch-${Date.now()}.json`);
+    const batchFile = hooksLogPath(`.wake-batch-${Date.now()}.json`);
     try {
       writeFileSync(batchFile, JSON.stringify(batch), "utf8");
     } catch (err) {

@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { shouldWakeForCoordMessage } from "./coord-mention-lib.mjs";
 import { gmWakeReplyTail, conWakeAddendum, saveInvWakeAddendum, buildGmSlashContext } from "./coord-gm-lib.mjs";
 import { dedupeWakeItems } from "./coord-wake-claim-lib.mjs";
+import { hooksLogPath } from "./coord-wake-logs-lib.mjs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const HOOKS_LOG = path.join(__dirname, "coord-hooks.log");
 export const LOCAL_ENV = path.join(__dirname, "coord-wake.local.env");
 export const AGENT_ID = process.env.AGENT_COORD_ID || "rico";
-export const QUEUE_FILE = path.join(__dirname, `.wake-queue-${AGENT_ID}.jsonl`);
+export const QUEUE_FILE = hooksLogPath(`.wake-queue-${AGENT_ID}.jsonl`);
 export const PROJECT = process.env.CURSOR_PROJECT_DIR || path.resolve(__dirname, "..", "..");
 export const MODEL = process.env.COORD_WAKE_MODEL || "composer-2.5";
 export const COORD_DIR =
@@ -56,7 +57,7 @@ export function mcpServers() {
     [serverName]: {
       type: "stdio",
       command: process.execPath,
-      args: [path.join(PROJECT, "agent-coord-mcp/dist/server.js")],
+      args: [path.join(PROJECT, "dist/server.js")],
       env: {
         AGENT_COORD_BOUND_AGENT: AGENT_ID,
         AGENT_COORD_DIR: COORD_DIR,

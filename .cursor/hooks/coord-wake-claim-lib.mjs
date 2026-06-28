@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { hooksLogPath } from "./coord-wake-logs-lib.mjs";
 const ROOT =
   process.env.AGENT_COORD_DIR ||
   process.env.CLAUDE_COORD_DIR ||
@@ -20,7 +19,7 @@ export function wakeMessageKey(msg) {
 }
 
 function claimFile(agentId) {
-  return path.join(__dirname, `coord-wake-claimed-${agentId}.json`);
+  return hooksLogPath(`coord-wake-claimed-${agentId}.json`);
 }
 
 function cursorFile(agentId) {

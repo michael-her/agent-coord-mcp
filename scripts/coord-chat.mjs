@@ -65,10 +65,12 @@ import {
   stopAll,
   writeTransportMarker,
 } from "./coord-agent-spawn.mjs";
+import { isAgentBusy } from "../.cursor/hooks/coord-busy-lib.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(SCRIPT_DIR, "..");
 const HOOKS_DIR = path.join(REPO, ".cursor", "hooks");
+const WAKE_LOGS_DIR = path.join(HOOKS_DIR, "logs");
 
 // ---------- args ----------
 
@@ -87,6 +89,11 @@ const GROUP_WINDOW = 2 * 60 * 1000;
 let lastBlock = { who: null, ts: 0, kind: null };
 
 let hintActive = false;
+let hintContent = null;
+let ephemeralLines = 0;
+let spinnerTick = 0;
+/** agentId → ts of last room/DM message seen this session (suppress spinner after reply). */
+const lastAgentMessageTs = new Map();
 
 // Auto-mention mode: null | "all" | agent id — prepended to outgoing room text.
 let autoMention = null;
@@ -107,6 +114,7 @@ const CURSOR_DIR = path.join(ROOT, "cursors");
 const TRANSPORT_DIR = path.join(ROOT, "transports");
 const AGENTS_FILE = path.join(ROOT, "agents.json");
 const MODELS_FILE = path.join(ROOT, "agent-models.json");
+const COLOR_MAP_FILE = path.join(ROOT, "chat-colors.json");
 const ROOM_FILE = path.join(ROOT, "room.jsonl");
 
 function loadWorkspaceDefaultModels() {
@@ -170,6 +178,8 @@ function seedAgentModelsFile() {
 
 function resolveDisplayModel(who, m) {
   if (m?.model) return String(m.model);
+  const invited = listInvited().find((r) => r.agentId === who);
+  if (invited?.model) return invited.model;
   const fromMap = readJsonSafe(MODELS_FILE, {})[who];
   if (fromMap) return fromMap;
   const fromReg = readJsonSafe(AGENTS_FILE, {})[who]?.model;
@@ -274,20 +284,28 @@ const A = {
   brightCyan:    (s) => `\x1b[96m${s}\x1b[0m`,
 };
 
-// Stable per-agent color via a persistent registry shared by all coord-chat
-// sessions. First time we see an agentId we pick the next unused palette
-// slot — guarantees no collisions until the palette is exhausted. After that
-// we fall back to hashing so behavior stays deterministic.
-const AGENT_COLORS = [
-  A.green, A.yellow, A.blue, A.magenta, A.cyan,
-  A.brightGreen, A.brightYellow, A.brightBlue, A.brightMagenta, A.brightCyan,
+// Stable per-agent color via chat-colors.json (index → RGB). Palette slots are
+// spread across hues so e.g. green / brightGreen never collide visually.
+const AGENT_RGB = [
+  [95, 175, 255],  // sky blue
+  [255, 120, 95],  // coral
+  [130, 210, 125], // sage
+  [255, 210, 75],  // amber
+  [200, 130, 255], // violet
+  [255, 130, 200], // pink
+  [75, 220, 210],  // aqua
+  [255, 170, 90],  // orange
+  [180, 180, 255], // periwinkle
+  [220, 220, 120], // khaki
 ];
+const SPINNER_FRAMES = ["|", "/", "-", "\\", "|"];
 // Will be initialized after ROOT is set, just below.
 
 // ---------- register and start UI ----------
 
 seedAgentModelsFile();
 await register();
+reconcileColorMap();
 
 const TTY = !!process.stdout.isTTY;
 let COLS = process.stdout.columns || 80;
@@ -315,7 +333,6 @@ const SLASH_COMMANDS = [
 ];
 
 const STATUS_FILE_PATH = path.join(ROOT, "status.jsonl");
-const COLOR_MAP_FILE = path.join(ROOT, "chat-colors.json");
 
 function completer(line) {
   // Tab-complete slash commands, DM targets, and @mentions mid-message.
@@ -430,6 +447,10 @@ for (const chan of joinedRooms()) watchRoom(chan);
 try { watch(AGENTS_FILE, () => refreshPrompt()); } catch {}
 const drainTimer = setInterval(() => void drainAndPrint(), 1000);
 const promptTimer = setInterval(refreshPrompt, 5000);
+const spinnerTimer = setInterval(() => {
+  spinnerTick++;
+  if (listBusyAgentIds().length > 0 || ephemeralLines > 0) paintEphemeral();
+}, 120);
 
 // Single teardown path: stop the poll timers and release the terminal so we
 // exit cleanly no matter which route we leave by (/quit, SIGINT, EOF).
@@ -440,6 +461,7 @@ function shutdown() {
   stopAll(HOOKS_DIR);
   clearInterval(drainTimer);
   clearInterval(promptTimer);
+  clearInterval(spinnerTimer);
   teardownFooter();
   try { rl.close(); } catch {}
 }
@@ -622,51 +644,195 @@ function sanitize(s) {
   return s.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-function agentColor(id) {
+function normalizeColorKey(id) {
+  return String(id ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^gm:/, "")
+    .replace(/[.,;:!?]+$/g, "");
+}
+
+function isRegisteredAgent(id) {
+  const key = normalizeColorKey(id);
+  if (!key || key === "all") return false;
+  return Object.prototype.hasOwnProperty.call(readJsonSafe(AGENTS_FILE, {}), key);
+}
+
+function colorAtIndex(idx) {
+  const [r, g, b] = AGENT_RGB[idx % AGENT_RGB.length];
+  return (s) => `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m`;
+}
+
+function hashColorFn(key) {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return colorAtIndex(h % AGENT_RGB.length);
+}
+
+function channelColor(s) {
+  return A.cyan(s);
+}
+
+function resolveColorIndex(key) {
+  if (!isRegisteredAgent(key)) return null;
   const map = readJsonSafe(COLOR_MAP_FILE, {});
-  const existing = map[id];
-  if (typeof existing === "number" && existing >= 0 && existing < AGENT_COLORS.length) {
-    return AGENT_COLORS[existing];
+  let idx = map[key];
+  if (typeof idx === "number" && idx >= 0 && idx < AGENT_RGB.length) return idx;
+  reconcileColorMap();
+  const idx2 = readJsonSafe(COLOR_MAP_FILE, {})[key];
+  return typeof idx2 === "number" && idx2 >= 0 && idx2 < AGENT_RGB.length ? idx2 : null;
+}
+
+/** Rebuild chat-colors.json: one unique palette slot per registered agent only. */
+function reconcileColorMap() {
+  const reg = readJsonSafe(AGENTS_FILE, {});
+  const agentIds = Object.keys(reg).sort();
+  const old = readJsonSafe(COLOR_MAP_FILE, {});
+  const next = {};
+  const used = new Set();
+
+  for (const id of agentIds) {
+    const prev = old[id];
+    if (typeof prev === "number" && prev >= 0 && prev < AGENT_RGB.length && !used.has(prev)) {
+      next[id] = prev;
+      used.add(prev);
+    }
   }
-  // First sighting — pick the first unused palette slot.
-  const used = new Set(Object.values(map).filter((v) => typeof v === "number"));
-  let idx = -1;
-  for (let i = 0; i < AGENT_COLORS.length; i++) {
-    if (!used.has(i)) { idx = i; break; }
+  for (const id of agentIds) {
+    if (next[id] !== undefined) continue;
+    let idx = -1;
+    for (let i = 0; i < AGENT_RGB.length; i++) {
+      if (!used.has(i)) { idx = i; break; }
+    }
+    if (idx === -1) {
+      idx = agentIds.indexOf(id) % AGENT_RGB.length;
+      for (let off = 0; off < AGENT_RGB.length; off++) {
+        const tryIdx = (idx + off) % AGENT_RGB.length;
+        if (!used.has(tryIdx)) { idx = tryIdx; break; }
+      }
+    }
+    next[id] = idx;
+    used.add(idx);
   }
-  if (idx === -1) {
-    // Palette exhausted — deterministic hash fallback. No persist (don't
-    // pollute the map with hash assignments that could be wrong).
-    let h = 0;
-    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-    return AGENT_COLORS[h % AGENT_COLORS.length];
+
+  if (JSON.stringify(old) !== JSON.stringify(next)) {
+    try { writeJsonAtomic(COLOR_MAP_FILE, next); } catch { /* best effort */ }
   }
-  // Persist. Re-read from disk first to merge any concurrent assignments
-  // by other coord-chat processes; last-writer-wins for a single agentId
-  // is fine since colors are cosmetic.
-  const onDisk = readJsonSafe(COLOR_MAP_FILE, {});
-  onDisk[id] = idx;
-  try { writeJsonAtomic(COLOR_MAP_FILE, onDisk); } catch { /* best effort */ }
-  return AGENT_COLORS[idx];
+}
+
+function agentColor(id) {
+  const key = normalizeColorKey(id);
+  if (!key) return (s) => s;
+  const idx = resolveColorIndex(key);
+  if (idx === null) return hashColorFn(key);
+  return colorAtIndex(idx);
+}
+
+// Ephemeral UI below scrollback: responding-agent headers, @mention picker, prompt.
+function clearEphemeral() {
+  if (typeof rl === "undefined" || ephemeralLines <= 0) return;
+  for (let i = 0; i < ephemeralLines; i++) {
+    process.stdout.write("\x1b[1A\r\x1b[2K");
+  }
+  ephemeralLines = 0;
+}
+
+function resetEphemeralHint() {
+  hintContent = null;
+  hintActive = false;
+}
+
+function busySince(agentId) {
+  const file = path.join(WAKE_LOGS_DIR, `coord-wake-busy-${agentId}.json`);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8")).since ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function shouldShowRespondingSpinner(agentId) {
+  if (!isAgentBusy(agentId)) return false;
+  const since = busySince(agentId);
+  const lastTs = lastAgentMessageTs.get(agentId);
+  if (since && lastTs && lastTs >= since) return false;
+  return true;
+}
+
+function listBusyAgentIds() {
+  const ids = [];
+  try {
+    for (const f of readdirSync(WAKE_LOGS_DIR)) {
+      const m = f.match(/^coord-wake-busy-(.+)\.json$/);
+      if (!m) continue;
+      const id = m[1];
+      if (id !== ID && shouldShowRespondingSpinner(id)) ids.push(id);
+    }
+  } catch {
+    /* ignore */
+  }
+  return ids.sort();
+}
+
+function agentBaseRgb(id) {
+  const key = normalizeColorKey(id);
+  const idx = resolveColorIndex(key);
+  if (idx !== null) return AGENT_RGB[idx];
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return AGENT_RGB[h % AGENT_RGB.length];
+}
+
+function rgbFg([r, g, b], s) {
+  return `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m`;
+}
+
+function shimmerSpinner(agentId, tick) {
+  const char = SPINNER_FRAMES[tick % SPINNER_FRAMES.length];
+  const [r0, g0, b0] = agentBaseRgb(agentId);
+  const t = (Math.sin(tick * 0.7) + 1) / 2;
+  const r = Math.round(r0 + (255 - r0) * t);
+  const g = Math.round(g0 + (255 - g0) * t);
+  const b = Math.round(b0 + (255 - b0) * t);
+  return rgbFg([r, g, b], char);
+}
+
+function buildRespondingHeader(agentId) {
+  const color = agentColor(agentId);
+  const gutter = color("▎");
+  const displayWho = gmDisplayId(agentId, currentRoom);
+  const model = resolveDisplayModel(agentId, null);
+  const spinner = shimmerSpinner(agentId, spinnerTick);
+  return `${gutter} ${A.bold(color(displayWho))} ${A.dim(`· ${model} · `)}${spinner}`;
+}
+
+function paintEphemeral() {
+  if (typeof rl === "undefined" || liveEmitting) return;
+  clearEphemeral();
+  readline.clearLine(process.stdout, 0);
+  readline.cursorTo(process.stdout, 0);
+  const lines = listBusyAgentIds().map((id) => buildRespondingHeader(id));
+  if (hintContent) lines.push(hintContent);
+  for (const line of lines) process.stdout.write(line + "\n");
+  ephemeralLines = lines.length;
+  rl.prompt(true);
 }
 
 // Ephemeral @mention picker: insert one line directly above the prompt, then
 // delete only that line on the next keystroke (never overwrite chat scrollback).
 function drawHint(content) {
   if (typeof rl === "undefined" || liveEmitting) return;
-  clearHint();
-  readline.clearLine(process.stdout, 0);
-  readline.cursorTo(process.stdout, 0);
-  process.stdout.write(content + "\n");
-  rl.prompt(true);
+  hintContent = content;
   hintActive = true;
+  paintEphemeral();
 }
 
 function clearHint() {
-  if (typeof rl === "undefined" || !hintActive) return;
-  process.stdout.write("\x1b[1A\r\x1b[2K");
-  rl.prompt(true);
+  if (!hintActive) return;
+  hintContent = null;
   hintActive = false;
+  paintEphemeral();
 }
 
 function redrawPrompt(force = false) {
@@ -675,13 +841,14 @@ function redrawPrompt(force = false) {
   rl.setPrompt(next);
   if (force || next !== cachedPrompt) {
     cachedPrompt = next;
-    rl.prompt(true);
+    paintEphemeral();
   }
 }
 
 function emitLive(outputLines) {
   if (!outputLines.length) return;
-  clearHint();
+  clearEphemeral();
+  resetEphemeralHint();
   liveEmitting = true;
   try {
     if (TTY && typeof rl !== "undefined") {
@@ -694,25 +861,28 @@ function emitLive(outputLines) {
   } finally {
     liveEmitting = false;
   }
-  redrawPrompt(true);
+  cachedPrompt = makePrompt();
+  rl.setPrompt(cachedPrompt);
+  paintEphemeral();
 }
 
 function say(line) {
-  clearHint();
+  clearEphemeral();
+  resetEphemeralHint();
   if (TTY && typeof rl !== "undefined") {
     readline.clearLine(process.stdout, 0);
     readline.cursorTo(process.stdout, 0);
   }
   process.stdout.write(line + "\n");
+  if (TTY && typeof rl !== "undefined") paintEphemeral();
 }
 
 function makePrompt() {
-  const chan = A.dim("#") + normalizeRoom(currentRoom);
   const mentionHint = autoMention
     ? A.yellow(`(@${autoMention === "all" ? "all" : autoMention})`)
     : "";
   const gap = mentionHint ? " " : "";
-  return `${agentColor(ID)(ID)} ${agentColor(currentRoom)(chan)}${gap}${mentionHint}${A.dim(">")} `;
+  return `${agentColor(ID)(ID)} ${channelColor("#" + normalizeRoom(currentRoom))}${gap}${mentionHint}${A.dim(">")} `;
 }
 
 function gmDisplayId(who, room) {
@@ -739,8 +909,9 @@ function applyAutoMention(text) {
   return `@${autoMention} ${t}`;
 }
 
-// No-op stubs kept so the exit paths don't reference deleted functions.
-function teardownFooter() {}
+function teardownFooter() {
+  clearEphemeral();
+}
 
 function refreshPrompt() {
   redrawPrompt(false);
@@ -1280,6 +1451,7 @@ async function registerInvitedAgent(agentId, model) {
     const e = (rooms[DEFAULT_ROOM] ??= { createdAt: Date.now(), createdBy: ID, members: [] });
     if (!e.members.includes(agentId)) e.members.push(agentId);
   });
+  reconcileColorMap();
 }
 
 async function findInHistory(term) {
@@ -1302,7 +1474,7 @@ async function findInHistory(term) {
 function showRoomBanner(chan) {
   const c = normalizeRoom(chan);
   const e = getRooms()[c];
-  say(A.bold(agentColor(c)(`#${c}`)) + (e?.topic ? A.dim(" — " + e.topic) : ""));
+  say(A.bold(channelColor(`#${c}`)) + (e?.topic ? A.dim(" — " + e.topic) : ""));
   if (e?.motd) say(A.dim("  rules: ") + e.motd);
   const members = e?.members ?? [];
   if (members.length) say(A.dim(`  members: ${members.join(", ")}`));
@@ -1322,7 +1494,7 @@ async function joinRoom(arg) {
   currentRoom = chan;
   watchRoom(chan);
   refreshPrompt();
-  say(A.dim("→ now in ") + A.bold(agentColor(chan)(`#${chan}`)));
+  say(A.dim("→ now in ") + A.bold(channelColor(`#${chan}`)));
   showRoomBanner(chan);
 }
 
@@ -1352,7 +1524,7 @@ function listRooms() {
       normalizeRoom(currentRoom) === c ? A.green("*") : joined.has(c) ? A.dim("·") : " ";
     const count = readJsonl(roomFile(c)).length;
     const topic = e.topic ? A.dim(" — " + e.topic) : "";
-    say(`  ${here} ${agentColor(c)(("#" + c).padEnd(16))} ${A.dim(`${(e.members ?? []).length} member(s), ${count} msg`)}${topic}`);
+    say(`  ${here} ${channelColor(("#" + c).padEnd(16))} ${A.dim(`${(e.members ?? []).length} member(s), ${count} msg`)}${topic}`);
   }
 }
 
@@ -1483,8 +1655,10 @@ async function nick(arg) {
   const cmap = readJsonSafe(COLOR_MAP_FILE, {});
   if (cmap[oldId] !== undefined && cmap[newId] === undefined) {
     cmap[newId] = cmap[oldId];
+    delete cmap[oldId];
     writeJsonAtomic(COLOR_MAP_FILE, cmap);
   }
+  reconcileColorMap();
 
   // Rebind in-session identity, then broadcast under the new name.
   ID = newId;
@@ -1774,7 +1948,10 @@ async function drainAndPrintOnce() {
 
   if (pending.length) {
     const lines = [];
-    for (const { kind, m } of pending) lines.push(...buildMsgLines(kind, m, { history: false }));
+    for (const { kind, m } of pending) {
+      if (m?.from && m.from !== ID) lastAgentMessageTs.set(m.from, m.ts ?? Date.now());
+      lines.push(...buildMsgLines(kind, m, { history: false }));
+    }
     emitLive(lines);
   }
 
@@ -1800,7 +1977,7 @@ function buildMsgLines(kind, m, opts = {}) {
   // A channel tag when the message isn't from the focused channel, so cross-
   // channel traffic stays legible without cluttering the common single-room case.
   const otherChan = kind === "room" && m.room && normalizeRoom(m.room) !== normalizeRoom(currentRoom);
-  const chanTag = otherChan ? agentColor(m.room)(`#${normalizeRoom(m.room)}`) + " " : "";
+  const chanTag = otherChan ? channelColor(`#${normalizeRoom(m.room)}`) + " " : "";
 
   // System notices (join/part/topic/nick) render as a dim italic one-liner.
   if (m.system) {
@@ -1901,8 +2078,10 @@ function formatBody(text) {
     // @mentions first — colored in the mentioned agent's hash color, bold if
     // it's the current user (so you can spot pings at a glance).
     s = s.replace(/@([A-Za-z0-9._-]+)/g, (_, name) => {
-      const colored = agentColor(name)(`@${name}`);
-      return name === ID ? A.bold(colored) : colored;
+      const key = normalizeColorKey(name);
+      if (key === "all") return A.bold(A.yellow("@all"));
+      const colored = agentColor(key)(`@${name}`);
+      return key === normalizeColorKey(ID) ? A.bold(colored) : colored;
     });
     // **bold**
     s = s.replace(/\*\*([^*\n]+)\*\*/g, (_, t) => A.bold(t));
