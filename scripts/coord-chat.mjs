@@ -447,6 +447,7 @@ for (const chan of joinedRooms()) watchRoom(chan);
 try { watch(AGENTS_FILE, () => refreshPrompt()); } catch {}
 const drainTimer = setInterval(() => void drainAndPrint(), 1000);
 const promptTimer = setInterval(refreshPrompt, 5000);
+const heartbeatTimer = setInterval(() => void touchHeartbeat(), 60_000);
 const spinnerTimer = setInterval(() => {
   spinnerTick++;
   if (listBusyAgentIds().length > 0 || ephemeralLines > 0) paintEphemeral();
@@ -461,6 +462,7 @@ function shutdown() {
   stopAll(HOOKS_DIR);
   clearInterval(drainTimer);
   clearInterval(promptTimer);
+  clearInterval(heartbeatTimer);
   clearInterval(spinnerTimer);
   teardownFooter();
   try { rl.close(); } catch {}
@@ -995,7 +997,7 @@ async function printWhoami() {
   const reg = readJsonSafe(AGENTS_FILE, {});
   const a = reg[ID];
   const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(ID)}.json`), null);
-  const live = marker && marker.pid && pidAlive(marker.pid);
+  const live = agentTransportLive(ID, marker, null);
   say(A.bold("you:"));
   say(`  ${A.cyan("id")}        ${agentColor(ID)(ID)}`);
   say(`  ${A.cyan("role")}      ${a?.role ?? "-"}`);
@@ -1065,6 +1067,7 @@ async function register() {
     };
     writeJsonAtomic(AGENTS_FILE, reg);
   });
+  writeHumanTransportMarker();
   // Record default-channel membership so /rooms + the hooks see us there.
   await updateRooms((reg) => {
     const e = (reg[DEFAULT_ROOM] ??= { createdAt: 0, createdBy: "system", members: [] });
@@ -1072,7 +1075,42 @@ async function register() {
   });
 }
 
+function writeHumanTransportMarker() {
+  writeTransportMarker({
+    transportDir: TRANSPORT_DIR,
+    agentId: ID,
+    model: resolveDisplayModel(ID, null),
+    listener: { pid: process.pid },
+    daemon: null,
+  });
+}
+
+async function touchHeartbeat() {
+  await withLock(AGENTS_FILE, async () => {
+    const reg = readJsonSafe(AGENTS_FILE, {});
+    const a = reg[ID];
+    if (!a) return;
+    a.lastHeartbeat = Date.now();
+    writeJsonAtomic(AGENTS_FILE, reg);
+  });
+  writeHumanTransportMarker();
+}
+
+function agentTransportLive(id, marker, managed) {
+  if (id === ID) return true;
+  return (
+    (managed && managed.listenerAlive && managed.daemonAlive) ||
+    (marker && marker.pid && pidAlive(marker.pid))
+  );
+}
+
+function agentOnline(id, entry, live, now, staleMs = 5 * 60 * 1000) {
+  if (id === ID) return true;
+  return live || now - (entry?.lastHeartbeat ?? 0) < staleMs;
+}
+
 async function unregister() {
+  clearTransportMarker(TRANSPORT_DIR, ID);
   await withLock(AGENTS_FILE, async () => {
     const reg = readJsonSafe(AGENTS_FILE, {});
     delete reg[ID];
@@ -1561,8 +1599,9 @@ function whois(target) {
   const a = reg[target];
   if (!a) return say(A.red(`no such agent: ${target}`));
   const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(target)}.json`), null);
-  const live = marker && marker.pid && pidAlive(marker.pid);
-  const online = live || Date.now() - a.lastHeartbeat < 5 * 60 * 1000;
+  const managed = listInvited().find((r) => r.agentId === target);
+  const live = agentTransportLive(target, marker, managed);
+  const online = agentOnline(target, a, live, Date.now());
   const rooms = Object.entries(getRooms())
     .filter(([, e]) => e.members?.includes(target))
     .map(([c]) => `#${c}`);
@@ -2037,6 +2076,11 @@ function visibleLength(s) {
   return s.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
+function padVisible(s, width) {
+  const pad = Math.max(0, width - visibleLength(s));
+  return s + " ".repeat(pad);
+}
+
 // Wrap one message's text, preserving list/indent structure: a leading bullet
 // ("- ", "* ", "1. ", "2) ") or whitespace indent is detected so wrapped
 // continuation lines hang-indent under the text rather than re-flowing as flat
@@ -2120,32 +2164,54 @@ async function printAgents() {
   const STALE = 5 * 60 * 1000;
   const ids = Object.keys(reg).sort();
   if (!ids.length) return say(A.dim("(no agents)"));
-  // Compute column widths from data so things line up.
-  const idW = Math.max(8, ...ids.map((i) => i.length));
+  const idW = Math.max(2, ...ids.map((i) => i.length));
   const roleW = Math.max(4, ...ids.map((i) => (reg[i].role ?? "-").length));
+  const modelW = Math.max(5, ...ids.map((i) => resolveDisplayModel(i, null).length));
+  const transW = 10;
+  const indent = "  ";
+  const dotPad = "  ";
   say(A.bold(`agents (${ids.length}):`));
   say(
-    "  " +
-      A.dim(
-        `${"id".padEnd(idW)}  ${"status".padEnd(7)}  ${"role".padEnd(roleW)}  transport`,
-      ),
+    indent +
+      dotPad +
+      A.dim(padVisible("id", idW)) +
+      "  " +
+      A.dim(padVisible("status", 7)) +
+      "  " +
+      A.dim(padVisible("role", roleW)) +
+      "  " +
+      A.dim(padVisible("model", modelW)) +
+      "  " +
+      A.dim("transport"),
   );
   for (const id of ids) {
     const a = reg[id];
     const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(id)}.json`), null);
     const managed = listInvited().find((r) => r.agentId === id);
-    const live =
-      (managed && managed.listenerAlive && managed.daemonAlive) ||
-      (marker && marker.pid && pidAlive(marker.pid));
-    const onlineNow = live || now - a.lastHeartbeat < STALE;
+    const live = agentTransportLive(id, marker, managed);
+    const onlineNow = agentOnline(id, a, live, now, STALE);
     const dot = onlineNow ? A.green("●") : A.dim("○");
-    const status = onlineNow ? "online " : "offline";
-    const role = (a.role ?? "-").padEnd(roleW);
-    const trans = live
+    const statusStr = onlineNow ? "online" : "offline";
+    const role = a.role ?? "-";
+    const model = resolveDisplayModel(id, null);
+    const transLabel = live
       ? A.green(marker?.transport === "coord-chat" ? "coord-chat" : (marker?.transport ?? "coord-chat"))
       : A.dim("none");
     const me = id === ID ? A.dim(" (you)") : "";
-    say(`  ${dot} ${agentColor(id)(id.padEnd(idW))}  ${A.dim(status)}  ${role}  ${trans}${me}`);
+    say(
+      indent +
+        `${dot} ` +
+        padVisible(agentColor(id)(id), idW) +
+        "  " +
+        padVisible(A.dim(statusStr), 7) +
+        "  " +
+        padVisible(role, roleW) +
+        "  " +
+        padVisible(A.dim(model), modelW) +
+        "  " +
+        padVisible(transLabel, transW) +
+        me,
+    );
   }
 }
 
@@ -2166,10 +2232,8 @@ function onlineAgentIds() {
       const a = reg[id];
       const marker = readJsonSafe(path.join(TRANSPORT_DIR, `${sanitize(id)}.json`), null);
       const managed = listInvited().find((r) => r.agentId === id);
-      const live =
-        (managed && managed.listenerAlive && managed.daemonAlive) ||
-        (marker && marker.pid && pidAlive(marker.pid));
-      return live || now - (a?.lastHeartbeat ?? 0) < STALE;
+      const live = agentTransportLive(id, marker, managed);
+      return agentOnline(id, a, live, now, STALE);
     })
     .sort();
 }
