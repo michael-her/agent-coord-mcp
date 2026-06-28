@@ -1,13 +1,63 @@
-import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOOKS_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const HOOKS_LOGS_DIR = path.join(HOOKS_DIR, "logs");
 
+/** Ephemeral wake/listener artifacts under `.cursor/hooks/` and `logs/`. */
+export const WAKE_TEMP_PATTERNS = [
+  /^coord-listener-state(-.*)?\.json$/,
+  /^coord-wake-daemon-state(-.*)?\.json$/,
+  /^coord-wake-claimed-.*\.json$/,
+  /^coord-wake-busy-.*\.json$/,
+  /^coord-wake-agent-id(-.*)?\.txt$/,
+  /^\.wake-queue(-.*)?\.jsonl$/,
+  /^\.wake-batch-.*\.json$/,
+  /^coord-wake-.*\.lock$/,
+  /^_test-batch\.json$/,
+];
+
 export function hooksLogPath(...parts) {
   mkdirSync(HOOKS_LOGS_DIR, { recursive: true });
   return path.join(HOOKS_LOGS_DIR, ...parts);
+}
+
+function isWakeTempName(name) {
+  return WAKE_TEMP_PATTERNS.some((re) => re.test(name));
+}
+
+/** List ephemeral wake/listener files in hooks root and `logs/`. */
+export function listWakeTempFiles({ hooksDir = HOOKS_DIR } = {}) {
+  const dirs = [hooksDir, path.join(hooksDir, "logs")];
+  const found = [];
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (isWakeTempName(name)) found.push(path.join(dir, name));
+    }
+  }
+  return found.sort();
+}
+
+/** Delete ephemeral wake/listener files. Returns { removed, failed, dryRun }. */
+export function cleanWakeTempFiles({ hooksDir = HOOKS_DIR, dryRun = false } = {}) {
+  const files = listWakeTempFiles({ hooksDir });
+  const removed = [];
+  const failed = [];
+  for (const file of files) {
+    if (dryRun) {
+      removed.push(file);
+      continue;
+    }
+    try {
+      unlinkSync(file);
+      removed.push(file);
+    } catch (err) {
+      failed.push({ file, error: err?.message ?? String(err) });
+    }
+  }
+  return { removed, failed, dryRun };
 }
 
 /** Move wake temp files from `.cursor/hooks/` into `logs/` (one-time). */
