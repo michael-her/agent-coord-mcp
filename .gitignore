@@ -8,11 +8,20 @@ dist/
 
 # Coordinator live board (local only — never published; the backlog IS tracked)
 LIVE_STATE_*.md
-.cursor/hooks/*.pid
+
+# coord wake/listener runtime (glob ≈ coord-wake-logs-lib WAKE_TEMP_PATTERNS; clean: scripts/clean-coord-hooks.mjs)
 .cursor/hooks/logs/
-.cursor/hooks/*-state*.json
-.cursor/hooks/_test-batch.json
+.cursor/hooks/*.pid
 .cursor/hooks/*.local.env
+.cursor/hooks/coord-listener-state*.json
+.cursor/hooks/coord-wake-daemon-state*.json
+.cursor/hooks/coord-wake-claimed-*.json
+.cursor/hooks/coord-wake-busy-*.json
+.cursor/hooks/coord-wake-agent-id*.txt
+.cursor/hooks/coord-wake-*.lock
+.cursor/hooks/.wake-queue*.jsonl
+.cursor/hooks/.wake-batch-*.json
+.cursor/hooks/_test-batch.json
 
 campaigns/
 chafa/vcpkg_installed/
