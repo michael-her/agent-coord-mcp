@@ -46,6 +46,8 @@ class ChatView {
   void TrackAgentMessage(const ChatMessage& msg);
 
   ftxui::Element RenderMessages() const;
+  ftxui::Element RenderMessageStack() const;
+  void EnsureChatBackground() const;
   ftxui::Element RenderOne(const ChatMessage& m) const;
   ftxui::Element RenderMessageBody(const std::string& body_text,
                                    const std::string& agent_id) const;
@@ -56,6 +58,7 @@ class ChatView {
 
   std::string RelTime(int64_t ts) const;
   int TerminalWidth() const;
+  int TerminalHeight() const;
   int SpinnerTick() const;
   void MaybeAttachImage(ChatMessage& msg);
   bool HandleMessageScroll(ftxui::Event event);
@@ -83,6 +86,9 @@ class ChatView {
   std::chrono::steady_clock::time_point last_busy_poll_{};
   ftxui::Component input_component_;
   ftxui::Component root_;
+  mutable std::optional<ftxui::Element> chat_bg_;
+  mutable int chat_bg_cols_ = 0;
+  mutable int chat_bg_rows_ = 0;
 };
 
 }  // namespace gnd

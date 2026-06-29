@@ -10,10 +10,12 @@
 #include <ftxui/dom/elements.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <regex>
 #include <sstream>
@@ -161,7 +163,7 @@ ChatView::ChatView(CoordBus& bus, std::function<void()> on_quit)
     return false;
   });
 
-  auto message_panel = Renderer([this] { return RenderMessages(); });
+  auto message_panel = Renderer([this] { return RenderMessageStack(); });
 
   auto container = Container::Vertical({
       message_panel,
@@ -215,6 +217,66 @@ int ChatView::TerminalWidth() const {
     }
   }
   return kDefaultWrapWidth;
+}
+
+int ChatView::TerminalHeight() const {
+#ifdef _WIN32
+  CONSOLE_SCREEN_BUFFER_INFO info{};
+  if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) {
+    return std::max(12, static_cast<int>(info.srWindow.Bottom -
+                                          info.srWindow.Top + 1));
+  }
+#endif
+  if (const char* rows = std::getenv("LINES")) {
+    try {
+      return std::max(12, std::stoi(rows));
+    } catch (...) {
+    }
+  }
+  return 24;
+}
+
+void ChatView::EnsureChatBackground() const {
+  const int cols =
+      std::clamp(TerminalWidth() * 2 / 3, 24, 56);
+  const int rows = std::max(10, cols / 2);
+  if (chat_bg_ && chat_bg_cols_ == cols && chat_bg_rows_ == rows) {
+    return;
+  }
+
+  const std::filesystem::path repo = bus_.Repo();
+  const std::array<std::filesystem::path, 2> candidates = {
+      repo / "tankuku.png",
+      repo / "gnd" / "gnd-client" / "tankuku.png",
+  };
+
+  for (const auto& path : candidates) {
+    if (!std::filesystem::exists(path)) {
+      continue;
+    }
+    if (auto element = RenderImageElement(path.string(), cols, rows)) {
+      chat_bg_ = std::move(*element);
+      chat_bg_cols_ = cols;
+      chat_bg_rows_ = rows;
+      return;
+    }
+  }
+
+  chat_bg_.reset();
+  chat_bg_cols_ = cols;
+  chat_bg_rows_ = rows;
+}
+
+Element ChatView::RenderMessageStack() const {
+  EnsureChatBackground();
+
+  Element messages = RenderMessages() | flex;
+  if (!chat_bg_) {
+    return messages;
+  }
+
+  Element background = center(*chat_bg_) | flex;
+  return dbox({std::move(background), std::move(messages)}) | flex;
 }
 
 int ChatView::SpinnerTick() const {
