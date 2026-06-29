@@ -35,7 +35,6 @@
 #define NOMINMAX     // Prevent windows.h from defining min/max macros
 #include <windows.h> // for OpenFileMapping, MapViewOfFile
 
-#include "color_info_sorted_2d.ipp" // for ColorInfoSorted2D
 #include "ftxui/component/app.hpp"  // for Component, App
 #include "ftxui/component/component.hpp" // for Checkbox, Renderer, Horizontal, Vertical, Input, Menu, Radiobox, ResizableSplitLeft, Tab
 #include "ftxui/component/component_base.hpp"    // for ComponentBase, Component
@@ -545,7 +544,7 @@ Component BuildDemoTab(DemoState& state) {
     auto palette_256_color_display = text("256 colors palette:");
     {
       // 사전에 정렬된 256색상 정보를 가져와서 격자 형태로 렌더링합니다.
-      std::vector<std::vector<ColorInfo>> info_columns = ColorInfoSorted2D();
+      std::vector<std::vector<ColorInfo>> info_columns = ftxui::ColorInfoSorted2D();
       Elements columns;
       for (auto &column : info_columns) {
         Elements column_elements;

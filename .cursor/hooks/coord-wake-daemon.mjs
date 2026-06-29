@@ -33,10 +33,14 @@ import {
 import { saveAgentModel } from "./coord-agent-lib.mjs";
 import { clearAgentBusy, releaseAgentBusy, setAgentBusy } from "./coord-busy-lib.mjs";
 import {
+  claimManagedHookPid,
+  clearHookManifest,
+  writeHookManifest,
+} from "./coord-pid-lib.mjs";
+import {
   advanceAgentCursorForWake,
   claimWakeMessages,
   dedupeWakeItems,
-  filterUnclaimed,
 } from "./coord-wake-claim-lib.mjs";
 import { hooksLogPath, migrateLegacyWakeLogs } from "./coord-wake-logs-lib.mjs";
 
@@ -45,89 +49,107 @@ const PID_FILE = path.join(__dirname, `coord-wake-daemon-${AGENT_ID}.pid`);
 const AGENT_ID_FILE = hooksLogPath(`coord-wake-agent-id-${AGENT_ID}.txt`);
 const STATE_FILE = hooksLogPath(`coord-wake-daemon-state-${AGENT_ID}.json`);
 
-loadLocalEnv();
-migrateLegacyWakeLogs(AGENT_ID);
-saveAgentModel(AGENT_ID, MODEL);
-
-const apiKey = process.env.CURSOR_API_KEY?.trim();
-if (!apiKey) {
-  console.error("[coord-wake-daemon] set CURSOR_API_KEY in coord-wake.local.env");
-  process.exit(1);
-}
-
-if (!claimDaemonPid()) {
-  process.exit(0);
-}
-
-process.on("exit", () => {
-  clearAgentBusy(AGENT_ID);
-  try {
-    if (existsSync(PID_FILE) && readFileSync(PID_FILE, "utf8").trim() === String(process.pid)) {
-      unlinkSync(PID_FILE);
-    }
-  } catch {
-    /* ignore */
-  }
-});
-
 let agent = null;
 let processing = false;
 let queueChain = Promise.resolve();
-let state = loadState();
+let state = { queueOffset: 0 };
 let lastSuccessAt = Date.now();
 let sessionNeedsReconnect = false;
+let apiKey = "";
 
-// SDK stall-detector aborts can surface as late unhandled rejections — don't exit.
-process.on("unhandledRejection", (err) => {
-  const msg = err?.message ?? String(err);
-  hookLog(`coord-wake unhandled: ${msg}`);
-  if (isSessionStaleError(msg)) sessionNeedsReconnect = true;
-  void resetAgent("unhandled rejection", { discardSavedId: isSessionStaleError(msg) });
-  releaseAgentBusy(AGENT_ID, "unhandled rejection");
-  hookLog("coord-wake busy released (unhandled rejection)");
-});
+export function startCoordWakeDaemon() {
+  loadLocalEnv();
+  migrateLegacyWakeLogs(AGENT_ID);
+  saveAgentModel(AGENT_ID, MODEL);
 
-process.on("uncaughtException", (err) => {
-  const msg = err?.message ?? String(err);
-  hookLog(`coord-wake uncaught: ${msg}`);
-  if (isSessionStaleError(msg)) sessionNeedsReconnect = true;
-  void resetAgent("uncaught exception", { discardSavedId: isSessionStaleError(msg) });
-  releaseAgentBusy(AGENT_ID, "uncaught exception");
-  hookLog("coord-wake busy released (uncaught exception)");
-  processing = false;
-});
+  apiKey = process.env.CURSOR_API_KEY?.trim() ?? "";
+  if (!apiKey) {
+    console.error("[coord-wake-daemon] set CURSOR_API_KEY in coord-wake.local.env");
+    process.exit(1);
+  }
 
-console.log(`[coord-wake-daemon] agent=${AGENT_ID} model=${MODEL} queue=${QUEUE_FILE}`);
-hookLog("coord-wake daemon start");
+  if (!claimDaemonPid()) {
+    return false;
+  }
 
-if (!existsSync(QUEUE_FILE)) writeFileSync(QUEUE_FILE, "", "utf8");
+  state = loadState();
+  lastSuccessAt = Date.now();
+  sessionNeedsReconnect = false;
 
-const drain = () => {
-  queueChain = queueChain.then(() => processQueue()).catch((err) => {
-    hookLog(`coord-wake queue error: ${err?.message ?? err}`);
+  process.on("exit", () => {
+    clearAgentBusy(AGENT_ID);
+    clearHookManifest(__dirname, AGENT_ID);
+    try {
+      if (existsSync(PID_FILE) && readFileSync(PID_FILE, "utf8").trim() === String(process.pid)) {
+        unlinkSync(PID_FILE);
+      }
+    } catch {
+      /* ignore */
+    }
   });
-};
 
-try {
-  watch(QUEUE_FILE, drain);
-} catch {
-  /* queue file may not exist yet */
+  // SDK stall-detector aborts can surface as late unhandled rejections — don't exit.
+  process.on("unhandledRejection", (err) => {
+    const msg = err?.message ?? String(err);
+    hookLog(`coord-wake unhandled: ${msg}`);
+    if (isSessionStaleError(msg)) sessionNeedsReconnect = true;
+    void resetAgent("unhandled rejection", { discardSavedId: isSessionStaleError(msg) });
+    releaseAgentBusy(AGENT_ID, "unhandled rejection");
+    hookLog("coord-wake busy released (unhandled rejection)");
+  });
+
+  process.on("uncaughtException", (err) => {
+    const msg = err?.message ?? String(err);
+    hookLog(`coord-wake uncaught: ${msg}`);
+    if (isSessionStaleError(msg)) sessionNeedsReconnect = true;
+    void resetAgent("uncaught exception", { discardSavedId: isSessionStaleError(msg) });
+    releaseAgentBusy(AGENT_ID, "uncaught exception");
+    hookLog("coord-wake busy released (uncaught exception)");
+    processing = false;
+  });
+
+  console.log(`[coord-wake-daemon] agent=${AGENT_ID} model=${MODEL} queue=${QUEUE_FILE}`);
+  hookLog("coord-wake daemon start");
+
+  if (!existsSync(QUEUE_FILE)) writeFileSync(QUEUE_FILE, "", "utf8");
+
+  const drain = () => {
+    queueChain = queueChain.then(() => processQueue()).catch((err) => {
+      hookLog(`coord-wake queue error: ${err?.message ?? err}`);
+    });
+  };
+
+  try {
+    watch(QUEUE_FILE, drain);
+  } catch {
+    /* queue file may not exist yet */
+  }
+  setInterval(drain, 400);
+
+  // Drop stale warm sessions during idle so the first post-idle wake does not hang.
+  setInterval(() => {
+    if (processing || !agent) return;
+    const idleMs = Date.now() - lastSuccessAt;
+    if (idleMs < SESSION_IDLE_MS) return;
+    void resetAgent("idle timeout (proactive)", { discardSavedId: true });
+  }, 60_000);
+
+  process.on("SIGINT", () => {
+    releaseAgentBusy(AGENT_ID, "SIGINT");
+    console.log("\n[coord-wake-daemon] stopped");
+    process.exit(0);
+  });
+
+  return true;
 }
-setInterval(drain, 400);
 
-// Drop stale warm sessions during idle so the first post-idle wake does not hang.
-setInterval(() => {
-  if (processing || !agent) return;
-  const idleMs = Date.now() - lastSuccessAt;
-  if (idleMs < SESSION_IDLE_MS) return;
-  void resetAgent("idle timeout (proactive)", { discardSavedId: true });
-}, 60_000);
+const isDirectRun =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
-process.on("SIGINT", () => {
-  releaseAgentBusy(AGENT_ID, "SIGINT");
-  console.log("\n[coord-wake-daemon] stopped");
-  process.exit(0);
-});
+if (isDirectRun) {
+  if (!startCoordWakeDaemon()) process.exit(0);
+}
 
 async function processQueue() {
   if (processing) return;
@@ -148,10 +170,7 @@ async function processQueue() {
     for (const line of lines) {
       let batch;
       try {
-        batch = filterUnclaimed(
-          AGENT_ID,
-          dedupeWakeItems(filterBatch(JSON.parse(line))),
-        );
+        batch = dedupeWakeItems(filterBatch(JSON.parse(line)));
       } catch {
         continue;
       }
@@ -248,7 +267,6 @@ async function retryWakeBatch(batch, reason, t0, { force, discardSavedId }) {
 async function sendWakeBatch(batch, force) {
   const a = await getAgent();
   const run = await a.send(buildPrompt(batch), {
-    mcpServers: mcpServers(),
     local: { force },
   });
   return await waitForRun(run);
@@ -317,15 +335,14 @@ async function resetAgent(reason, { discardSavedId = false } = {}) {
 }
 
 function claimDaemonPid() {
-  if (existsSync(PID_FILE)) {
-    const old = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
-    if (old && old !== process.pid && isProcessAlive(old)) {
-      console.log(`[coord-wake-daemon] already running (pid ${old}), exit`);
-      hookLog(`coord-wake daemon skip: already running pid=${old}`);
-      return false;
-    }
+  if (
+    !claimManagedHookPid(PID_FILE, {
+      log: (line) => hookLog(line),
+    })
+  ) {
+    return false;
   }
-  writeFileSync(PID_FILE, String(process.pid), "utf8");
+  writeHookManifest(__dirname, AGENT_ID, { role: "daemon" });
   return true;
 }
 

@@ -3,6 +3,7 @@ import { shouldWakeForCoordMessage } from "./coord-mention-lib.mjs";
 import { gmWakeReplyTail, conWakeAddendum, saveInvWakeAddendum, buildGmSlashContext } from "./coord-gm-lib.mjs";
 import { dedupeWakeItems } from "./coord-wake-claim-lib.mjs";
 import { hooksLogPath } from "./coord-wake-logs-lib.mjs";
+import { mergeNodeImportHide, spawnHideImportArgs } from "./coord-spawn-hide.mjs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,12 +58,12 @@ export function mcpServers() {
     [serverName]: {
       type: "stdio",
       command: process.execPath,
-      args: [path.join(PROJECT, "dist/server.js")],
-      env: {
+      args: [...spawnHideImportArgs(), path.join(PROJECT, "dist/server.js")],
+      env: mergeNodeImportHide({
         AGENT_COORD_BOUND_AGENT: AGENT_ID,
         AGENT_COORD_DIR: COORD_DIR,
         AGENT_COORD_MODEL: MODEL,
-      },
+      }),
     },
   };
 }

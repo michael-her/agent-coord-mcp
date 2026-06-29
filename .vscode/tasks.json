@@ -2,80 +2,35 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "agent wake stack (rico)",
-      "dependsOn": [
-        "coord-listener (rico)",
-        "coord-wake-daemon (rico)"
-      ],
-      "dependsOrder": "parallel",
-      "problemMatcher": []
+      "label": "gnd-client build (Debug)",
+      "type": "shell",
+      "command": "msbuild gnd.sln /p:Configuration=Debug /p:Platform=x64 /v:minimal",
+      "options": {
+        "cwd": "${workspaceFolder}/gnd",
+        "shell": {
+          "executable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "args": ["-NoLogo", "-Command"]
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile"
     },
     {
-      "label": "coord-listener (rico)",
+      "label": "gnd-client build (Release)",
       "type": "shell",
-      "command": "node .cursor/hooks/coord-listener.mjs",
+      "command": "vcpkg install --triplet x64-windows && msbuild gnd.sln /p:Configuration=Release /p:Platform=x64 /v:minimal",
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "AGENT_COORD_ID": "rico",
-          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord",
-          "CURSOR_PROJECT_DIR": "${workspaceFolder}",
-          "COORD_WAKE": "1",
-          "COORD_WAKE_DAEMON": "1",
-          "COORD_AUTO_REPLY": "0"
+        "cwd": "${workspaceFolder}/gnd",
+        "shell": {
+          "executable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "args": ["-NoLogo", "-Command"]
         }
       },
-      "isBackground": true,
-      "problemMatcher": {
-        "owner": "coord",
-        "pattern": {
-          "regexp": "^$"
-        },
-        "background": {
-          "activeOnStart": true,
-          "beginsPattern": "\\[coord-listener\\]",
-          "endsPattern": "Ctrl\\+C to stop"
-        }
-      },
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "group": "rico-wake-stack"
-      }
-    },
-    {
-      "label": "coord-wake-daemon (rico)",
-      "type": "shell",
-      "command": "node .cursor/hooks/coord-wake-daemon.mjs",
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "AGENT_COORD_ID": "rico",
-          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord",
-          "CURSOR_PROJECT_DIR": "${workspaceFolder}",
-          "COORD_WAKE": "1",
-          "COORD_WAKE_DAEMON": "1",
-          "COORD_WAKE_MODEL": "composer-2.5",
-          "COORD_AUTO_REPLY": "0"
-        }
-      },
-      "isBackground": true,
-      "problemMatcher": {
-        "owner": "coord",
-        "pattern": {
-          "regexp": "^$"
-        },
-        "background": {
-          "activeOnStart": true,
-          "beginsPattern": "\\[coord-wake-daemon\\]",
-          "endsPattern": "agent=rico"
-        }
-      },
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "group": "rico-wake-stack"
-      }
+      "group": "build",
+      "problemMatcher": "$msCompile"
     },
     {
       "label": "gnd-client (sehui)",

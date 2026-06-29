@@ -13,6 +13,10 @@
     "freetype",
     "stb",
     "pkgconf",
-    "nlohmann-json"
+    "nlohmann-json",
+    {
+      "name": "ftxui",
+      "version>=": "7.0.0"
+    }
   ]
 }

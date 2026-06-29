@@ -35,13 +35,15 @@ class ChatView {
   ftxui::Element RenderOne(const ChatMessage& m) const;
   std::string RelTime(int64_t ts) const;
   void MaybeAttachImage(ChatMessage& msg);
+  bool HandleMessageScroll(ftxui::Event event);
 
   CoordBus& bus_;
   std::function<void()> on_quit_;
   std::vector<ChatMessage> messages_;
   std::string input_;
   bool should_quit_ = false;
-  int scroll_y_ = 0;
+  float scroll_y_ = 1.f;
+  bool follow_tail_ = true;
   std::chrono::steady_clock::time_point last_heartbeat_{};
   std::chrono::steady_clock::time_point last_poll_{};
   ftxui::Component input_component_;

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../.cursor/hooks/coord-spawn-hide.mjs";
 import { randomUUID } from "node:crypto";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

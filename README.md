@@ -252,7 +252,7 @@ msbuild gnd/gnd.sln /p:Configuration=Debug /p:Platform=x64
 gnd/x64/Debug/gnd.exe --id sehui --dir %USERPROFILE%\agent-coord
 ```
 
-Transport marker is `gnd-client` (visible in `/list`). Commands include plain text post, `/dm`, `/list`, `/invited`, `/uninvite`, `/kick`, `/help`, `/whoami`, `/quit`, `/img <path>`.
+Transport marker is `gnd-client` (visible in `/list`). Commands include plain text post, `/dm`, `/invite`, `/list`, `/invited`, `/uninvite`, `/kick`, `/help`, `/whoami`, `/quit`, `/img <path>`.
 
 ## Active push via tmux (any CLI agent)
 

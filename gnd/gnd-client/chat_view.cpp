@@ -5,6 +5,8 @@
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_options.hpp>
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
 
 #include <algorithm>
@@ -50,21 +52,26 @@ ChatView::ChatView(CoordBus& bus, std::function<void()> on_quit)
   input_component_ = Input(&input_, "> ", input_opt);
 
   auto message_panel = Renderer([this] { return RenderMessages(); });
-  auto separator_line = Renderer([] { return separator(); });
 
   auto container = Container::Vertical({
       message_panel,
-      separator_line,
       input_component_,
   });
 
-  root_ = Renderer(container, [message_panel, separator_line, this] {
-    return vbox({
-        message_panel->Render() | flex,
-        separator(),
-        input_component_->Render(),
-    });
-  });
+  root_ = CatchEvent(
+      Renderer(container, [this, message_panel] {
+        const std::string title = "#" + std::string(CoordBus::kDefaultRoom) +
+                                  " · " + bus_.AgentId();
+        return vbox({
+            text(title) | bold | center,
+            text("PgUp/PgDn · wheel scroll") | dim | center,
+            separator(),
+            message_panel->Render() | flex,
+            separator(),
+            input_component_->Render(),
+        });
+      }),
+      [this](Event event) { return HandleMessageScroll(std::move(event)); });
 }
 
 void ChatView::LoadHistory(const std::vector<ChatMessage>& history) {
@@ -72,12 +79,16 @@ void ChatView::LoadHistory(const std::vector<ChatMessage>& history) {
     MaybeAttachImage(m);
     messages_.push_back(std::move(m));
   }
+  scroll_y_ = 1.f;
+  follow_tail_ = true;
 }
 
 void ChatView::AppendMessage(ChatMessage msg) {
   MaybeAttachImage(msg);
   messages_.push_back(std::move(msg));
-  scroll_y_ = static_cast<int>(messages_.size()) * 1000;
+  if (follow_tail_) {
+    scroll_y_ = 1.f;
+  }
 }
 
 void ChatView::MaybeAttachImage(ChatMessage& msg) {
@@ -120,8 +131,9 @@ void ChatView::HandleInputSubmit() {
     m.kind = MessageKind::System;
     m.from = "gnd-client";
     m.text =
-        "commands: /help /quit /whoami /list /invited /uninvite <id|@all> "
-        "/kick <id> /dm <id> <text> /img <path> ![alt](path)";
+        "commands: /help /quit /whoami /list /invite <model>@<id> /invite @all "
+        "/invited /uninvite <id|@all> /kick <id> /dm <id> <text> /img <path> "
+        "![alt](path)";
     m.ts = CoordBus::NowMs();
     AppendMessage(std::move(m));
     return;
@@ -147,6 +159,27 @@ void ChatView::HandleInputSubmit() {
   if (line == "/invited") {
     AppendSystemLines(RunCoordAdmin(bus_.Repo(), bus_.Root(), bus_.AgentId(),
                                     {"invited"}));
+    return;
+  }
+
+  if (line == "/invite" || line.rfind("/invite ", 0) == 0) {
+    const std::string arg =
+        line.size() > 8 ? Trim(line.substr(8)) : std::string{};
+    if (line.rfind("/invite ", 0) == 0 && arg.empty()) {
+      ChatMessage m;
+      m.kind = MessageKind::System;
+      m.from = "gnd-client";
+      m.text = "usage: /invite <model>@<agentId> or /invite @all";
+      m.ts = CoordBus::NowMs();
+      AppendMessage(std::move(m));
+      return;
+    }
+    std::vector<std::string> admin_args = {"invite"};
+    if (!arg.empty()) {
+      admin_args.push_back(arg);
+    }
+    AppendSystemLines(RunCoordAdmin(bus_.Repo(), bus_.Root(), bus_.AgentId(),
+                                    admin_args));
     return;
   }
 
@@ -268,7 +301,7 @@ std::string ChatView::RelTime(int64_t ts) const {
 
 Element ChatView::RenderOne(const ChatMessage& m) const {
   if (m.kind == MessageKind::System || m.kind == MessageKind::Dice) {
-    return text("  — " + m.from + " " + m.text + " —") | dim | italic;
+    return paragraph("  — " + m.from + " " + m.text + " —") | dim | italic;
   }
 
   Color who_color = Color::GreenLight;
@@ -287,21 +320,44 @@ Element ChatView::RenderOne(const ChatMessage& m) const {
 
   Elements body;
   body.push_back(text("▎ " + header) | color(who_color) | bold);
-  body.push_back(text("▎ " + m.text));
+  body.push_back(paragraph("▎ " + m.text));
   if (!m.image_ansi.empty()) {
     body.push_back(text(m.image_ansi));
   }
   return vbox(std::move(body));
 }
 
+bool ChatView::HandleMessageScroll(Event event) {
+  constexpr float kLineStep = 0.04f;
+  constexpr float kPageStep = 0.35f;
+
+  auto apply = [this](float delta) {
+    scroll_y_ = std::clamp(scroll_y_ + delta, 0.f, 1.f);
+    follow_tail_ = scroll_y_ >= 0.995f;
+    return true;
+  };
+
+  // Do not bind ArrowUp/Down or Home/End — reserved for focus nav and input editing.
+  if (event == Event::PageUp) {
+    return apply(-kPageStep);
+  }
+  if (event == Event::PageDown) {
+    return apply(kPageStep);
+  }
+  if (event.is_mouse()) {
+    const auto mouse = event.mouse();
+    if (mouse.button == Mouse::WheelUp) {
+      return apply(-kLineStep * 3.f);
+    }
+    if (mouse.button == Mouse::WheelDown) {
+      return apply(kLineStep * 3.f);
+    }
+  }
+  return false;
+}
+
 Element ChatView::RenderMessages() const {
-  const std::string title =
-      "#" + std::string(CoordBus::kDefaultRoom) + " · " + bus_.AgentId();
-
   Elements rows;
-  rows.push_back(text(title) | bold | center);
-  rows.push_back(separator());
-
   if (messages_.empty()) {
     rows.push_back(text("(no messages)") | dim | center);
   } else {
@@ -311,7 +367,8 @@ Element ChatView::RenderMessages() const {
     }
   }
 
-  return vbox(std::move(rows)) | yframe | vscroll_indicator;
+  return vbox(std::move(rows)) | focusPositionRelative(0.f, scroll_y_) | yframe |
+         vscroll_indicator;
 }
 
 }  // namespace gnd

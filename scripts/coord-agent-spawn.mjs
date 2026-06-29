@@ -10,8 +10,16 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { hiddenChildProcessOptions, mergeNodeImportHide, spawnHiddenNode } from "../.cursor/hooks/coord-spawn-hide.mjs";
+import {
+  clearHookManifest,
+  discoverRunningHookPids,
+  killPidTreeSync,
+  readHookManifestPids,
+  readHookPidFilePids,
+  sleepMs,
+} from "../.cursor/hooks/coord-pid-lib.mjs";
 import { saveAgentModel } from "../.cursor/hooks/coord-agent-lib.mjs";
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** @type {Map<string, { model: string, listener: import("node:child_process").ChildProcess, daemon: import("node:child_process").ChildProcess }>} */
@@ -75,6 +83,14 @@ export function listInvited() {
   }));
 }
 
+/** Human-readable PID line: stack mode → one pid; legacy split → listener + daemon. */
+export function formatHookStackPids(listenerPid, daemonPid) {
+  const l = listenerPid ?? null;
+  const d = daemonPid ?? null;
+  if (l && d && l === d) return `stack=${l}`;
+  return `listener=${l ?? "-"} daemon=${d ?? "-"}`;
+}
+
 export function isInvited(agentId) {
   return stacks.has(String(agentId ?? "").trim().toLowerCase());
 }
@@ -93,9 +109,14 @@ function pidFile(hooksDir, name) {
   return path.join(hooksDir, name);
 }
 
+function killPidTree(pid) {
+  killPidTreeSync(pid);
+}
+
 /** Kill orphan listener/daemon from a previous coord-chat or VS Code task. */
 export function killStaleHookProcesses(hooksDir, agentId) {
   const id = String(agentId ?? "").trim().toLowerCase();
+  const victims = new Set(readHookManifestPids(hooksDir, id));
   for (const suffix of [`coord-listener-${id}.pid`, `coord-wake-daemon-${id}.pid`]) {
     const file = pidFile(hooksDir, suffix);
     if (!existsSync(file)) continue;
@@ -105,19 +126,16 @@ export function killStaleHookProcesses(hooksDir, agentId) {
     } catch {
       /* ignore */
     }
-    if (old && old !== process.pid && childAlive({ pid: old })) {
-      try {
-        process.kill(old, "SIGTERM");
-      } catch {
-        /* ignore */
-      }
-    }
+    if (old && old !== process.pid) victims.add(old);
     try {
       unlinkSync(file);
     } catch {
       /* ignore */
     }
   }
+  for (const pid of victims) killPidTreeSync(pid);
+  sleepMs(300);
+  clearHookManifest(hooksDir, id);
   const savedAgent = path.join(hooksDir, "logs", `coord-wake-agent-id-${id}.txt`);
   try {
     if (existsSync(savedAgent)) unlinkSync(savedAgent);
@@ -127,7 +145,7 @@ export function killStaleHookProcesses(hooksDir, agentId) {
 }
 
 function baseChildEnv({ agentId, coordDir, projectDir, model }) {
-  return {
+  return mergeNodeImportHide({
     ...process.env,
     AGENT_COORD_ID: agentId,
     AGENT_COORD_DIR: coordDir,
@@ -140,35 +158,21 @@ function baseChildEnv({ agentId, coordDir, projectDir, model }) {
     COORD_WAKE_MODEL: model,
     COORD_CHAT_MANAGED: "1",
     COORD_CHAT_PARENT_PID: String(process.pid),
-  };
+  });
 }
 
-function spawnHookChild(hooksDir, projectDir, script, env) {
+function spawnHookChild(hooksDir, projectDir, script, env, { detached = false } = {}) {
   const entry = path.join(hooksDir, script);
-  // Scripts import coord-spawn-hide.mjs themselves. Do not pass --import with an
-  // absolute Windows path (Node 22 treats G:\... as URL scheme "g:" → exit 1).
-  return spawn(process.execPath, [entry], {
+  return spawnHiddenNode(entry, {
     cwd: projectDir,
     env,
-    stdio: "ignore",
-    windowsHide: true,
+    detached,
   });
 }
 
 function killChild(proc, signal = "SIGTERM") {
   if (!proc?.pid || proc.killed) return;
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/PID", String(proc.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return;
-    }
-    process.kill(proc.pid, signal);
-  } catch {
-    /* ignore */
-  }
+  killPidTree(proc.pid);
 }
 
 export function getInvitedStack(agentId) {
@@ -185,6 +189,7 @@ export function inviteAgent({
   hooksDir,
   projectDir,
   coordDir,
+  detachChildren = false,
   onChildExit,
 }) {
   const id = String(agentId ?? "").trim().toLowerCase();
@@ -196,19 +201,31 @@ export function inviteAgent({
   killStaleHookProcesses(hooksDir, id);
 
   const env = baseChildEnv({ agentId: id, coordDir, projectDir, model: modelName });
-  const listener = spawnHookChild(hooksDir, projectDir, "coord-listener.mjs", env);
-  const daemon = spawnHookChild(hooksDir, projectDir, "coord-wake-daemon.mjs", env);
+  const spawnOpts = { detached: detachChildren };
+  let listener;
+  let daemon;
 
-  const attachExit = (label, proc) => {
-    proc.on("exit", (code, signal) => {
-      onChildExit?.({ agentId: id, label, code, signal });
-    });
-    proc.on("error", (err) => {
-      onChildExit?.({ agentId: id, label, error: err?.message ?? String(err) });
-    });
-  };
-  attachExit("listener", listener);
-  attachExit("daemon", daemon);
+  if (!detachChildren) {
+    const stack = spawnHookChild(hooksDir, projectDir, "coord-agent-stack.mjs", env, spawnOpts);
+    listener = stack;
+    daemon = stack;
+  } else {
+    listener = spawnHookChild(hooksDir, projectDir, "coord-listener.mjs", env, spawnOpts);
+    daemon = spawnHookChild(hooksDir, projectDir, "coord-wake-daemon.mjs", env, spawnOpts);
+  }
+
+  if (!detachChildren) {
+    const attachExit = (label, proc) => {
+      proc.on("exit", (code, signal) => {
+        onChildExit?.({ agentId: id, label, code, signal });
+      });
+      proc.on("error", (err) => {
+        onChildExit?.({ agentId: id, label, error: err?.message ?? String(err) });
+      });
+    };
+    attachExit("listener", listener);
+    attachExit("daemon", daemon);
+  }
 
   stacks.set(id, { model: modelName, listener, daemon });
   saveAgentModel(id, modelName);
@@ -230,8 +247,8 @@ export function stopAgent(agentId, hooksDir) {
     killStaleHookProcesses(hooksDir, id);
     return false;
   }
-  killChild(entry.listener, "SIGTERM");
-  killChild(entry.daemon, "SIGTERM");
+  const pids = new Set([entry.listener?.pid, entry.daemon?.pid].filter(Boolean));
+  for (const pid of pids) killPidTree(pid);
   stacks.delete(id);
   killStaleHookProcesses(hooksDir, id);
   return true;
@@ -304,6 +321,12 @@ export function stopAllHookStacks(hooksDir) {
     ids.add(row.agentId);
   }
   for (const id of ids) stopHookStack(hooksDir, id);
+  const orphans = new Set([
+    ...readHookPidFilePids(hooksDir),
+    ...discoverRunningHookPids(),
+  ]);
+  for (const pid of orphans) killPidTreeSync(pid);
+  if (orphans.size) sleepMs(300);
   return [...ids].sort((a, b) => a.localeCompare(b));
 }
 

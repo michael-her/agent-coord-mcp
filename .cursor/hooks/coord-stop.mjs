@@ -34,6 +34,7 @@ import { isAgentBusy } from "./coord-busy-lib.mjs";
 import { shouldWakeForCoordMessage } from "./coord-mention-lib.mjs";
 import { gmWakeReplyTail } from "./coord-gm-lib.mjs";
 import { isWakeClaimed } from "./coord-wake-claim-lib.mjs";
+import { isProcessAlive } from "./coord-wake-lib.mjs";
 
 const ROOT =
   process.env.AGENT_COORD_DIR ||
@@ -41,6 +42,22 @@ const ROOT =
   path.join(homedir(), "agent-coord");
 const INCLUDE_ROOM = process.env.AGENT_COORD_INCLUDE_ROOM !== "0";
 const DEFAULT_ROOM = "general";
+
+function wakeDaemonPidFile(agentId) {
+  return join(__dirname, `coord-wake-daemon-${String(agentId).trim().toLowerCase()}.pid`);
+}
+
+/** True when coord-chat backend manages wake for this agent (skip IDE stop-hook delivery). */
+function isCoordWakeManaged(agentId) {
+  const file = wakeDaemonPidFile(agentId);
+  if (!existsSync(file)) return false;
+  try {
+    const pid = parseInt(readFileSync(file, "utf8").trim(), 10);
+    return Boolean(pid && isProcessAlive(pid));
+  } catch {
+    return false;
+  }
+}
 
 function main() {
   log(`START stop pid=${process.pid}`);
@@ -68,6 +85,13 @@ function main() {
   if (isAgentBusy(AGENT_ID)) {
     log("skip: agent busy (wake in progress)");
     hookLog(`stop skip: agent busy (${AGENT_ID})`);
+    process.stdout.write("{}\n");
+    return;
+  }
+
+  if (isCoordWakeManaged(AGENT_ID)) {
+    log("skip: coord-chat wake-daemon manages @mention delivery");
+    hookLog(`stop skip: wake-daemon active (${AGENT_ID})`);
     process.stdout.write("{}\n");
     return;
   }

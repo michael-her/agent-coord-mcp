@@ -9,6 +9,7 @@ export const HOOKS_LOGS_DIR = path.join(HOOKS_DIR, "logs");
 export const WAKE_TEMP_PATTERNS = [
   /^coord-listener-state(-.*)?\.json$/,
   /^coord-wake-daemon-state(-.*)?\.json$/,
+  /^coord-hook-manifest-.*\.json$/,
   /^coord-wake-claimed-.*\.json$/,
   /^coord-wake-busy-.*\.json$/,
   /^coord-wake-agent-id(-.*)?\.txt$/,

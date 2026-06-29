@@ -2,7 +2,7 @@
 // Background listener: new agent-coord messages → log + coord-wake.
 // Usage: node .cursor/hooks/coord-listener.mjs
 
-import "./coord-spawn-hide.mjs";
+import { spawnHiddenNode } from "./coord-spawn-hide.mjs";
 
 import {
   existsSync,
@@ -16,14 +16,20 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { shouldWakeForCoordMessage } from "./coord-mention-lib.mjs";
 import { isAgentBusy } from "./coord-busy-lib.mjs";
+import {
+  claimManagedHookPid,
+  clearHookManifest,
+  writeHookManifest,
+} from "./coord-pid-lib.mjs";
 import { isProcessAlive, queueBatch } from "./coord-wake-lib.mjs";
 import {
   advanceAgentCursorForWake,
+  claimWakeMessages,
   dedupeWakeItems,
+  isWakeClaimed,
 } from "./coord-wake-claim-lib.mjs";
 import { hooksLogPath, migrateLegacyWakeLogs } from "./coord-wake-logs-lib.mjs";
 
@@ -159,10 +165,9 @@ function preview(text, max = 180) {
 function spawnAutoReply(msg, chanLabel) {
   if (!AUTO_REPLY_ENABLED) return;
   const chan = chanLabel === "DM" ? "DM" : normalizeRoom(chanLabel.replace(/^#/, ""));
-  const child = spawn(process.execPath, [AUTO_REPLY_SCRIPT, JSON.stringify(msg), chan], {
-    stdio: "ignore",
-    windowsHide: true,
+  const child = spawnHiddenNode(AUTO_REPLY_SCRIPT, {
     env: process.env,
+    args: [JSON.stringify(msg), chan],
   });
   child.on("error", (err) => {
     console.error("[coord-listener] auto-reply failed:", err.message);
@@ -172,7 +177,7 @@ function spawnAutoReply(msg, chanLabel) {
 function scheduleWake(msg, chanLabel) {
   if (!WAKE_ENABLED) return;
   const chan = chanLabel === "DM" ? "DM" : `#${normalizeRoom(chanLabel.replace(/^#/, ""))}`;
-  wakeBatch.push({
+  const item = {
     id: msg.id,
     ts: msg.ts,
     from: msg.from,
@@ -182,7 +187,11 @@ function scheduleWake(msg, chanLabel) {
     wakeAll: msg.wakeAll === true,
     dice: msg.dice === true,
     contextLimit: msg.contextLimit,
-  });
+  };
+  if (isWakeClaimed(AGENT_ID, item)) return;
+  // Claim before debounce so Cursor stop-hook does not race and deliver the same message.
+  claimWakeMessages(AGENT_ID, [item]);
+  wakeBatch.push(item);
   requestWakeFlush();
 }
 
@@ -216,6 +225,8 @@ function flushWakeBatch() {
       wakeInFlight = false;
       return;
     }
+    // Items are claimed in scheduleWake (before debounce) to beat stop-hook races.
+    // Do not filterUnclaimed here — that would drop every batched item.
     advanceAgentCursorForWake(AGENT_ID, batch);
     wakeInFlight = true;
 
@@ -241,14 +252,15 @@ function flushWakeBatch() {
     }
     let child;
     try {
-      child = spawn(process.execPath, [WAKE_SCRIPT, batchFile], {
-        stdio: "ignore",
-        windowsHide: true,
+      child = spawnHiddenNode(WAKE_SCRIPT, {
         env: {
           ...process.env,
-          CURSOR_PROJECT_DIR: process.env.CURSOR_PROJECT_DIR || path.resolve(__dirname, "..", ".."),
+          CURSOR_PROJECT_DIR:
+            process.env.CURSOR_PROJECT_DIR ||
+            path.resolve(__dirname, "..", ".."),
         },
         cwd: __dirname,
+        args: [batchFile],
       });
     } catch (err) {
       try {
@@ -337,25 +349,25 @@ function scanOnce(state) {
 }
 
 function claimListenerPid() {
-  if (existsSync(PID_FILE)) {
-    const old = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
-    if (old && old !== process.pid && isProcessAlive(old)) {
-      console.log(`[coord-listener] already running (pid ${old}), exit`);
-      hookLog(`coord-listener skip: already running pid=${old}`);
-      return false;
-    }
+  if (
+    !claimManagedHookPid(PID_FILE, {
+      log: (line) => hookLog(line),
+    })
+  ) {
+    return false;
   }
-  writeFileSync(PID_FILE, String(process.pid), "utf8");
+  writeHookManifest(__dirname, AGENT_ID, { role: "listener" });
   return true;
 }
 
-function main() {
+export function startCoordListener() {
   if (!claimListenerPid()) {
     process.exit(0);
     return;
   }
 
   process.on("exit", () => {
+    clearHookManifest(__dirname, AGENT_ID);
     try {
       if (existsSync(PID_FILE) && readFileSync(PID_FILE, "utf8").trim() === String(process.pid)) {
         unlinkSync(PID_FILE);
@@ -449,10 +461,16 @@ function main() {
   });
 }
 
-try {
-  main();
-} catch (err) {
-  console.error("[coord-listener] startup failed:", err?.message ?? err);
-  hookLog(`coord-listener startup failed: ${err?.message ?? err}`);
-  process.exit(1);
+const isDirectRun =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (isDirectRun) {
+  try {
+    startCoordListener();
+  } catch (err) {
+    console.error("[coord-listener] startup failed:", err?.message ?? err);
+    hookLog(`coord-listener startup failed: ${err?.message ?? err}`);
+    process.exit(1);
+  }
 }

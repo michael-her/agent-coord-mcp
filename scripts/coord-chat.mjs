@@ -1,24 +1,9 @@
 #!/usr/bin/env node
 /**
  * coord-chat — minimal IRC-style TUI so a human can join the agent-coord bus.
- *
- * Usage:
- *   node scripts/coord-chat.mjs [--id <name>] [--dir <path>]
- *   coord-chat [--id <name>] [--dir <path>]    # if installed via npm bin
- *
- * Defaults: --id $USER, --dir $AGENT_COORD_DIR || ~/agent-coord
- *
- * Commands at the prompt:
- *   <text>             → post to shared room
- *   /dm <id> <text>    → DM a specific agent
- *   /list              → show registered agents + transports
- *   /help              → show commands
- *   /quit              → unregister and exit
- *
- * Dependency-light: only proper-lockfile (already a package dep) for the
- * read-modify-write on agents.json. JSONL appends are single small writes
- * (POSIX atomic under PIPE_BUF), no lock needed.
  */
+
+import "../.cursor/hooks/coord-spawn-hide.mjs";
 
 import {
   existsSync,
@@ -58,6 +43,7 @@ import {
   inviteAgent,
   isInvited,
   listInvited,
+  formatHookStackPids,
   parseInviteSpec,
   isInviteAllArg,
   collectRegistryInviteTargets,
@@ -75,6 +61,7 @@ const WAKE_LOGS_DIR = path.join(HOOKS_DIR, "logs");
 // ---------- args ----------
 
 const args = parseArgs(process.argv.slice(2));
+const BACKEND = !!args.backend;
 let ID = args.id ?? process.env.USER ?? "human"; // reassignable so /nick can rebind it
 const ROOT = args.dir ?? process.env.AGENT_COORD_DIR ?? path.join(homedir(), "agent-coord");
 
@@ -304,10 +291,14 @@ const SPINNER_FRAMES = ["|", "/", "-", "\\", "|"];
 // ---------- register and start UI ----------
 
 seedAgentModelsFile();
-await register();
+if (!BACKEND) {
+  await register();
+}
 reconcileColorMap();
 
-const TTY = !!process.stdout.isTTY;
+const TTY = BACKEND ? false : !!process.stdout.isTTY;
+/** When set, say() appends stripped lines for gnd-client IPC responses. */
+let ipcSayCapture = null;
 let COLS = process.stdout.columns || 80;
 let cachedPrompt = "";
 let liveEmitting = false;
@@ -403,18 +394,21 @@ function commonPrefix(strs) {
   return p;
 }
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: makePrompt(),
-  completer,
-});
+let rl;
+if (!BACKEND) {
+  rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: makePrompt(),
+    completer,
+  });
+}
 
 // Auto-offer the logged-in agents the instant "@" is typed (editor-style),
 // so you don't have to press Tab to discover who's reachable. We only observe
 // keypresses — readline still owns input. setImmediate lets readline insert
 // the "@" into its line buffer before we inspect it.
-if (process.stdin.isTTY) {
+if (!BACKEND && process.stdin.isTTY) {
   readline.emitKeypressEvents(process.stdin);
   process.stdin.on("keypress", (str, key) => {
     // setImmediate lets readline mutate its line buffer first, then we inspect
@@ -427,31 +421,49 @@ if (process.stdin.isTTY) {
   });
 }
 
-// Banner — printed once on launch. Keep it tight; this is a CLI, not a poster.
-printBanner();
-// Show recent context (last 3 messages from inbox + room) then fast-forward
-// the cursor so the same entries don't show up again via the watcher path.
-fastForwardCursors();
-await printRecent(3);
+let drainTimer;
+let promptTimer;
+let heartbeatTimer;
+let spinnerTimer;
+let lineChain = Promise.resolve();
 
-// Surface the focused channel's topic + MOTD (room rules) on launch — same
-// banner /join shows — so the rules are seen on connect, not just on switch.
-// Skip the bare header when neither is set, to avoid noise.
-{
-  const e = getRooms()[normalizeRoom(currentRoom)];
-  if (e?.topic || e?.motd) showRoomBanner(currentRoom);
+if (!BACKEND) {
+  // Banner — printed once on launch. Keep it tight; this is a CLI, not a poster.
+  printBanner();
+  // Show recent context (last 3 messages from inbox + room) then fast-forward
+  // the cursor so the same entries don't show up again via the watcher path.
+  fastForwardCursors();
+  await printRecent(3);
+
+  // Surface the focused channel's topic + MOTD (room rules) on launch — same
+  // banner /join shows — so the rules are seen on connect, not just on switch.
+  // Skip the bare header when neither is set, to avoid noise.
+  {
+    const e = getRooms()[normalizeRoom(currentRoom)];
+    if (e?.topic || e?.motd) showRoomBanner(currentRoom);
+  }
+
+  try { watch(INBOX_FILE, () => void drainAndPrint()); } catch {}
+  for (const chan of joinedRooms()) watchRoom(chan);
+  try { watch(AGENTS_FILE, () => refreshPrompt()); } catch {}
+  drainTimer = setInterval(() => void drainAndPrint(), 1000);
+  promptTimer = setInterval(refreshPrompt, 5000);
+  heartbeatTimer = setInterval(() => void touchHeartbeat(), 60_000);
+  spinnerTimer = setInterval(() => {
+    spinnerTick++;
+    if (listBusyAgentIds().length > 0 || ephemeralLines > 0) paintEphemeral();
+  }, 120);
+
+  redrawPrompt(true);
+
+  // Serialize line handling: readline fires 'line' events back-to-back for
+  // pasted/piped input, and our handlers are async (channel switches, file RMW).
+  // Chaining them guarantees e.g. "/join #x" fully completes — currentRoom set —
+  // before the next line posts, so a message can't leak into the old channel.
+  rl.on("line", (line) => {
+    lineChain = lineChain.then(() => handleLine(line)).catch(() => {});
+  });
 }
-
-try { watch(INBOX_FILE, () => void drainAndPrint()); } catch {}
-for (const chan of joinedRooms()) watchRoom(chan);
-try { watch(AGENTS_FILE, () => refreshPrompt()); } catch {}
-const drainTimer = setInterval(() => void drainAndPrint(), 1000);
-const promptTimer = setInterval(refreshPrompt, 5000);
-const heartbeatTimer = setInterval(() => void touchHeartbeat(), 60_000);
-const spinnerTimer = setInterval(() => {
-  spinnerTick++;
-  if (listBusyAgentIds().length > 0 || ephemeralLines > 0) paintEphemeral();
-}, 120);
 
 // Single teardown path: stop the poll timers and release the terminal so we
 // exit cleanly no matter which route we leave by (/quit, SIGINT, EOF).
@@ -460,24 +472,15 @@ function shutdown() {
   if (toreDown) return;
   toreDown = true;
   stopAll(HOOKS_DIR);
-  clearInterval(drainTimer);
-  clearInterval(promptTimer);
-  clearInterval(heartbeatTimer);
-  clearInterval(spinnerTimer);
-  teardownFooter();
-  try { rl.close(); } catch {}
+  if (!BACKEND) {
+    clearInterval(drainTimer);
+    clearInterval(promptTimer);
+    clearInterval(heartbeatTimer);
+    clearInterval(spinnerTimer);
+    teardownFooter();
+    try { rl?.close(); } catch {}
+  }
 }
-
-redrawPrompt(true);
-
-// Serialize line handling: readline fires 'line' events back-to-back for
-// pasted/piped input, and our handlers are async (channel switches, file RMW).
-// Chaining them guarantees e.g. "/join #x" fully completes — currentRoom set —
-// before the next line posts, so a message can't leak into the old channel.
-let lineChain = Promise.resolve();
-rl.on("line", (line) => {
-  lineChain = lineChain.then(() => handleLine(line)).catch(() => {});
-});
 
 async function handleLine(line) {
   const text = line.trim();
@@ -632,9 +635,11 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--id") out.id = argv[++i];
     else if (argv[i] === "--dir") out.dir = argv[++i];
+    else if (argv[i] === "--backend") out.backend = true;
     else if (argv[i] === "-h" || argv[i] === "--help") {
       console.log("coord-chat — minimal TUI for agent-coord-mcp");
-      console.log("usage: coord-chat [--id <name>] [--dir <path>]");
+      console.log("usage: coord-chat [--id <name>] [--dir <path>] [--backend]");
+      console.log("  --backend   headless IPC server for gnd-client (no TUI/register)");
       console.log("at prompt: <text>=room  /dm <id> <text>  /list  /quit");
       process.exit(0);
     }
@@ -868,7 +873,15 @@ function emitLive(outputLines) {
   paintEphemeral();
 }
 
+function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function say(line) {
+  if (ipcSayCapture) {
+    ipcSayCapture.push(stripAnsi(line));
+    return;
+  }
   clearEphemeral();
   resetEphemeralHint();
   if (TTY && typeof rl !== "undefined") {
@@ -1368,7 +1381,7 @@ async function doInviteAgent(spec, { announce = true } = {}) {
   }
   say(
     `${A.green("invited")} ${agentColor(spec.agentId)(spec.agentId)} ` +
-      A.dim(`model=${spec.model} listener=${result.listenerPid} daemon=${result.daemonPid}`),
+      A.dim(`model=${spec.model} ${formatHookStackPids(result.listenerPid, result.daemonPid)}`),
   );
   return result;
 }
@@ -1464,7 +1477,7 @@ function printInvitedAgents() {
     const dot = live ? A.green("●") : A.dim("○");
     say(
       `  ${dot} ${agentColor(r.agentId)(r.agentId.padEnd(12))} ` +
-        A.dim(`${r.model}  listener=${r.listenerPid ?? "-"} daemon=${r.daemonPid ?? "-"}`),
+        A.dim(`${r.model}  ${formatHookStackPids(r.listenerPid, r.daemonPid)}`),
     );
   }
 }
@@ -2286,4 +2299,47 @@ function writeJsonAtomic(file, data) {
     // advances the cursor so messages are not replayed into the TUI.
     writeFileSync(file, payload, "utf8");
   }
+}
+
+// ---------- gnd-client backend (headless coord-chat + IPC) ----------
+
+async function runLineForIpc(line) {
+  ipcSayCapture = [];
+  try {
+    await handleLine(line.trim());
+  } catch (e) {
+    ipcSayCapture.push(`error: ${e?.message ?? e}`);
+  } finally {
+    const out = ipcSayCapture;
+    ipcSayCapture = null;
+    return out;
+  }
+}
+
+if (BACKEND) {
+  process.env.COORD_CHAT_BACKEND = "1";
+  const { startCoordChatIpc, cleanupIpcManifest } = await import(
+    "./coord-chat-ipc.mjs"
+  );
+
+  process.on("SIGTERM", () => {
+    cleanupIpcManifest(ROOT, ID);
+    shutdown();
+    process.exit(0);
+  });
+
+  await startCoordChatIpc({
+    coordDir: ROOT,
+    agentId: ID,
+    onRequest: (line) =>
+      new Promise((resolve, reject) => {
+        lineChain = lineChain
+          .then(async () => resolve(await runLineForIpc(line)))
+          .catch(reject);
+      }),
+  });
+
+  process.stderr.write(
+    `[coord-chat] backend ipc ready for ${ID} (dir=${ROOT})\n`,
+  );
 }

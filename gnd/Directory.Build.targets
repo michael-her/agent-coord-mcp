@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <Target Name="SyncChafaMsvcConfig"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MSBuildProjectName)'=='chafa'">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)msvc\chafa-config\config.h"
+          DestinationFiles="$(MSBuildProjectDirectory)\config.h"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)msvc\chafa-config\chafaconfig.h"
+          DestinationFiles="$(MSBuildProjectDirectory)\chafa\chafaconfig.h"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

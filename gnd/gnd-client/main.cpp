@@ -1,4 +1,5 @@
 ﻿#include "chat_view.hpp"
+#include "coord_admin.hpp"
 #include "coord_bus.hpp"
 #include "demo_tab.hpp"
 
@@ -152,6 +153,9 @@ int main(int argc, char** argv) {
     std::cerr << "failed to register as " << args.id << "\n";
     return 1;
   }
+  if (!gnd::StartCoordChatBackend(args.repo, args.dir, args.id)) {
+    std::cerr << "warning: coord-chat backend failed to start (admin commands unavailable)\n";
+  }
   bus.FastForwardCursors();
 
   auto screen = App::Fullscreen();
@@ -221,6 +225,8 @@ int main(int argc, char** argv) {
   if (!quitting && !chat_view.ShouldQuit()) {
     bus.Unregister();
   }
+
+  gnd::StopCoordChatBackend();
 
   return 0;
 }

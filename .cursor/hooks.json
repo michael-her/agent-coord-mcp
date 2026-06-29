@@ -3,31 +3,31 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "G:\\dev\\llm\\.cursor\\hooks\\coord-session-start.cmd",
+        "command": "G:\\dev\\airpg\\.cursor\\hooks\\coord-session-start.cmd",
         "timeout": 10
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "G:\\dev\\llm\\.cursor\\hooks\\coord-audit.cmd",
+        "command": "G:\\dev\\airpg\\.cursor\\hooks\\coord-audit.cmd",
         "timeout": 10
       }
     ],
     "postToolUse": [
       {
-        "command": "G:\\dev\\llm\\.cursor\\hooks\\coord-audit.cmd",
+        "command": "G:\\dev\\airpg\\.cursor\\hooks\\coord-audit.cmd",
         "timeout": 10
       }
     ],
     "afterMCPExecution": [
       {
-        "command": "G:\\dev\\llm\\.cursor\\hooks\\coord-audit.cmd",
+        "command": "G:\\dev\\airpg\\.cursor\\hooks\\coord-audit.cmd",
         "timeout": 10
       }
     ],
     "stop": [
       {
-        "command": "G:\\dev\\llm\\.cursor\\hooks\\coord-stop.cmd",
+        "command": "G:\\dev\\airpg\\.cursor\\hooks\\coord-stop.cmd",
         "loop_limit": null,
         "timeout": 20
       }

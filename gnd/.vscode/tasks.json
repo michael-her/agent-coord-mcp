@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "gnd-client build (Debug)",
+      "type": "shell",
+      "command": "msbuild gnd.sln /p:Configuration=Debug /p:Platform=x64 /v:minimal",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "args": ["-NoLogo", "-Command"]
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}
