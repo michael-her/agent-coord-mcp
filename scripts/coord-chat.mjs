@@ -299,6 +299,8 @@ reconcileColorMap();
 const TTY = BACKEND ? false : !!process.stdout.isTTY;
 /** When set, say() appends stripped lines for gnd-client IPC responses. */
 let ipcSayCapture = null;
+/** gnd-client IPC: "quit" | "clear" | null */
+let ipcAction = null;
 let COLS = process.stdout.columns || 80;
 let cachedPrompt = "";
 let liveEmitting = false;
@@ -484,13 +486,21 @@ function shutdown() {
 
 async function handleLine(line) {
   const text = line.trim();
-  if (!text) return redrawPrompt(true);
+  if (!text) {
+    if (!BACKEND) redrawPrompt(true);
+    return;
+  }
   try {
     if (text === "/quit" || text === "/exit" || text.startsWith("/quit ") || text.startsWith("/exit ")) {
       const msg = text.replace(/^\/(quit|exit)\s*/, "").trim();
       for (const chan of joinedRooms()) await sendSystem(chan, msg ? `has quit (${msg})` : "has quit");
       await unregister();
       shutdown();
+      if (BACKEND) {
+        say(A.dim("bye."));
+        ipcAction = "quit";
+        return;
+      }
       process.stdout.write(A.dim("bye.\n"));
       process.exit(0);
     } else if (text === "/help" || text === "/?") {
@@ -530,8 +540,13 @@ async function handleLine(line) {
     } else if (text === "/whoami") {
       await printWhoami();
     } else if (text === "/clear" || text === "/cls") {
-      process.stdout.write("\x1b[2J\x1b[H");
-      printBanner();
+      if (BACKEND) {
+        ipcAction = "clear";
+        say(A.dim("(screen cleared)"));
+      } else {
+        process.stdout.write("\x1b[2J\x1b[H");
+        printBanner();
+      }
     } else if (text.startsWith("/last")) {
       const m = text.match(/^\/last(?:\s+(\d+))?$/);
       const n = m && m[1] ? parseInt(m[1], 10) : 20;
@@ -613,7 +628,7 @@ async function handleLine(line) {
   } catch (e) {
     say(A.red(`error: ${e?.message ?? e}`));
   }
-  redrawPrompt(true);
+  if (!BACKEND) redrawPrompt(true);
 }
 
 process.on("SIGINT", async () => {
@@ -1045,7 +1060,10 @@ async function printRecent(n) {
   }
   const lines = [A.bold(`last ${all.length} message(s):`)];
   for (const m of all) lines.push(...buildMsgLines(m._kind, m, { history: true }));
-  for (const row of lines) process.stdout.write(row + "\n");
+  for (const row of lines) {
+    if (BACKEND) say(row);
+    else process.stdout.write(row + "\n");
+  }
 }
 
 async function withLock(file, fn) {
@@ -2078,7 +2096,10 @@ function buildMsgLines(kind, m, opts = {}) {
 function printMsg(kind, m, opts = {}) {
   const outputLines = buildMsgLines(kind, m, opts);
   if (opts.history) {
-    for (const row of outputLines) process.stdout.write(row + "\n");
+    for (const row of outputLines) {
+      if (BACKEND) say(row);
+      else process.stdout.write(row + "\n");
+    }
   } else {
     emitLive(outputLines);
   }
@@ -2305,15 +2326,21 @@ function writeJsonAtomic(file, data) {
 
 async function runLineForIpc(line) {
   ipcSayCapture = [];
+  ipcAction = null;
   try {
     await handleLine(line.trim());
   } catch (e) {
     ipcSayCapture.push(`error: ${e?.message ?? e}`);
-  } finally {
-    const out = ipcSayCapture;
-    ipcSayCapture = null;
-    return out;
   }
+  const out = {
+    lines: ipcSayCapture ?? [],
+    action: ipcAction,
+    currentRoom,
+    autoMention,
+  };
+  ipcSayCapture = null;
+  ipcAction = null;
+  return out;
 }
 
 if (BACKEND) {

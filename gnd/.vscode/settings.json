@@ -2,5 +2,6 @@
   "cSpell.words": [
     "Chafa",
     "ftxui"
-  ]
+  ],
+  "terminal.external.windowsExec": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
 }

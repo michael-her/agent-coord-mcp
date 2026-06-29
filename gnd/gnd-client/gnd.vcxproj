@@ -104,7 +104,10 @@
     </ProjectReference>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="agent_busy.cpp" />
+    <ClCompile Include="agent_colors.cpp" />
     <ClCompile Include="chafa_element.cpp" />
+    <ClCompile Include="chat_completer.cpp" />
     <ClCompile Include="chat_view.cpp" />
     <ClCompile Include="coord_admin.cpp" />
     <ClCompile Include="coord_bus.cpp" />

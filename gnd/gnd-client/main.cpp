@@ -1,4 +1,4 @@
-﻿#include "chat_view.hpp"
+#include "chat_view.hpp"
 #include "coord_admin.hpp"
 #include "coord_bus.hpp"
 #include "demo_tab.hpp"
@@ -9,6 +9,7 @@
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 #include <chrono>
 #include <cstdlib>
@@ -117,6 +118,7 @@ CliArgs ParseArgs(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   EnableVteProcessing();
+  ftxui::Terminal::SetColorSupport(ftxui::Terminal::TrueColor);
   const CliArgs args = ParseArgs(argc, argv);
 
   gnd::CoordBus bus({args.id, args.dir, args.repo});

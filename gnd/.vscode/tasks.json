@@ -2,6 +2,41 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "gnd-client: debug in external pwsh",
+      "dependsOn": ["gnd-client build (Debug)"],
+      "type": "process",
+      "command": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": [
+        "-NoLogo",
+        "-File",
+        "${workspaceFolder}/../.vscode/gnd-debug-launch.ps1",
+        "-WorkspaceFolder",
+        "${workspaceFolder}/..",
+        "-AgentId",
+        "sehui"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared",
+        "focus": false
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "gnd-external",
+        "pattern": {
+          "regexp": "."
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "GND_DEBUG_READY"
+        }
+      }
+    },
+    {
       "label": "gnd-client build (Debug)",
       "type": "shell",
       "command": "msbuild gnd.sln /p:Configuration=Debug /p:Platform=x64 /v:minimal",

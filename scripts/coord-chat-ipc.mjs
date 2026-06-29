@@ -122,8 +122,20 @@ export function startCoordChatIpc({ coordDir, agentId, onRequest }) {
             }
 
             try {
-              const lines = await onRequest(line);
-              socket.write(`${JSON.stringify({ ok: true, lines })}\n`);
+              const result = await onRequest(line);
+              const payload =
+                result && typeof result === "object" && !Array.isArray(result)
+                  ? result
+                  : { lines: result ?? [] };
+              socket.write(
+                `${JSON.stringify({
+                  ok: true,
+                  lines: payload.lines ?? [],
+                  action: payload.action ?? null,
+                  currentRoom: payload.currentRoom ?? null,
+                  autoMention: payload.autoMention ?? null,
+                })}\n`,
+              );
             } catch (err) {
               socket.write(
                 `${JSON.stringify({

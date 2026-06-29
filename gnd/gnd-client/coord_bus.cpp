@@ -1,4 +1,5 @@
 #include "coord_bus.hpp"
+#include "agent_colors.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -157,13 +158,70 @@ void CoordBus::ReadCursorState() {
   const auto cur = ReadJsonSafe(cursor_file_, nlohmann::json::object());
   room_offset_ = cur.value("roomOffset", 0);
   inbox_offset_ = cur.value("inboxOffset", 0);
+  room_offsets_.clear();
+  if (cur.contains("roomOffsets") && cur["roomOffsets"].is_object()) {
+    for (const auto& [key, val] : cur["roomOffsets"].items()) {
+      if (val.is_number_integer()) {
+        room_offsets_[key] = val.get<int64_t>();
+      }
+    }
+  }
 }
 
 void CoordBus::SaveCursor() {
   nlohmann::json cur = ReadJsonSafe(cursor_file_, nlohmann::json::object());
   cur["roomOffset"] = room_offset_;
   cur["inboxOffset"] = inbox_offset_;
+  nlohmann::json offsets = nlohmann::json::object();
+  for (const auto& [chan, off] : room_offsets_) {
+    offsets[chan] = off;
+  }
+  cur["roomOffsets"] = offsets;
   WriteJsonAtomic(cursor_file_, cur);
+}
+
+std::vector<std::string> CoordBus::JoinedRooms() const {
+  std::vector<std::string> out;
+  const auto reg = ReadJsonSafe(rooms_file_, nlohmann::json::object());
+  for (const auto& [name, entry] : reg.items()) {
+    if (!entry.is_object() || !entry.contains("members") ||
+        !entry["members"].is_array()) {
+      continue;
+    }
+    for (const auto& member : entry["members"]) {
+      if (member.is_string() && member.get<std::string>() == config_.agent_id) {
+        out.push_back(NormalizeRoom(name));
+        break;
+      }
+    }
+  }
+  if (out.empty()) {
+    out.push_back(kDefaultRoom);
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+int64_t CoordBus::RoomOffsetFor(const std::string& chan) const {
+  const auto c = NormalizeRoom(chan);
+  if (c == kDefaultRoom) {
+    return room_offset_;
+  }
+  const auto it = room_offsets_.find(c);
+  if (it != room_offsets_.end()) {
+    return it->second;
+  }
+  return 0;
+}
+
+void CoordBus::SetRoomOffsetFor(const std::string& chan, int64_t offset) {
+  const auto c = NormalizeRoom(chan);
+  if (c == kDefaultRoom) {
+    room_offset_ = offset;
+    return;
+  }
+  room_offsets_[c] = offset;
 }
 
 int64_t CoordBus::CountJsonlLines(const std::filesystem::path& file) const {
@@ -331,6 +389,7 @@ bool CoordBus::Register() {
   });
   WriteTransportMarker();
   UpdateRoomsMembership(true);
+  AgentColors(config_.root).ReconcileColorMap();
   return true;
 }
 
@@ -352,33 +411,34 @@ void CoordBus::TouchHeartbeat() {
 }
 
 void CoordBus::FastForwardCursors() {
-  room_offset_ = CountJsonlLines(room_file_);
+  ReadCursorState();
+  for (const auto& chan : JoinedRooms()) {
+    SetRoomOffsetFor(chan, CountJsonlLines(RoomFile(chan)));
+  }
   inbox_offset_ = CountJsonlLines(inbox_file_);
   SaveCursor();
 }
 
 std::vector<ChatMessage> CoordBus::RecentMessages(int count) {
-  std::vector<ChatMessage> inbox;
+  std::vector<ChatMessage> all;
   if (std::filesystem::exists(inbox_file_)) {
     const int64_t total = CountJsonlLines(inbox_file_);
     const int64_t from = std::max<int64_t>(0, total - count);
-    inbox = ReadJsonlSlice(inbox_file_, from, total, MessageKind::Dm);
+    auto inbox = ReadJsonlSlice(inbox_file_, from, total, MessageKind::Dm);
+    all.insert(all.end(), inbox.begin(), inbox.end());
   }
-  std::vector<ChatMessage> rooms;
-  {
-    const int64_t total = CountJsonlLines(room_file_);
+  for (const auto& chan : JoinedRooms()) {
+    const auto file = RoomFile(chan);
+    const int64_t total = CountJsonlLines(file);
     const int64_t from = std::max<int64_t>(0, total - count);
-    rooms = ReadJsonlSlice(room_file_, from, total, MessageKind::Room);
+    auto rooms = ReadJsonlSlice(file, from, total, MessageKind::Room);
     for (auto& m : rooms) {
       if (m.room.empty()) {
-        m.room = kDefaultRoom;
+        m.room = chan;
       }
     }
+    all.insert(all.end(), rooms.begin(), rooms.end());
   }
-  std::vector<ChatMessage> all;
-  all.reserve(inbox.size() + rooms.size());
-  all.insert(all.end(), inbox.begin(), inbox.end());
-  all.insert(all.end(), rooms.begin(), rooms.end());
   std::sort(all.begin(), all.end(),
             [](const ChatMessage& a, const ChatMessage& b) { return a.ts < b.ts; });
   if (static_cast<int>(all.size()) > count) {
@@ -391,33 +451,31 @@ std::vector<ChatMessage> CoordBus::RecentMessages(int count) {
 }
 
 std::vector<ChatMessage> CoordBus::DrainNewMessages() {
+  ReadCursorState();
   std::vector<ChatMessage> pending;
 
   const int64_t inbox_total = CountJsonlLines(inbox_file_);
   if (inbox_total > inbox_offset_) {
     auto msgs =
         ReadJsonlSlice(inbox_file_, inbox_offset_, inbox_total, MessageKind::Dm);
-    for (auto& m : msgs) {
-      if (m.from != config_.agent_id) {
-        pending.push_back(std::move(m));
-      }
-    }
+    pending.insert(pending.end(), msgs.begin(), msgs.end());
     inbox_offset_ = inbox_total;
   }
 
-  const int64_t room_total = CountJsonlLines(room_file_);
-  if (room_total > room_offset_) {
-    auto msgs =
-        ReadJsonlSlice(room_file_, room_offset_, room_total, MessageKind::Room);
-    for (auto& m : msgs) {
-      if (m.room.empty()) {
-        m.room = kDefaultRoom;
-      }
-      if (m.from != config_.agent_id) {
+  for (const auto& chan : JoinedRooms()) {
+    const auto file = RoomFile(chan);
+    const int64_t total = CountJsonlLines(file);
+    const int64_t offset = RoomOffsetFor(chan);
+    if (total > offset) {
+      auto msgs = ReadJsonlSlice(file, offset, total, MessageKind::Room);
+      for (auto& m : msgs) {
+        if (m.room.empty()) {
+          m.room = chan;
+        }
         pending.push_back(std::move(m));
       }
+      SetRoomOffsetFor(chan, total);
     }
-    room_offset_ = room_total;
   }
 
   if (!pending.empty()) {

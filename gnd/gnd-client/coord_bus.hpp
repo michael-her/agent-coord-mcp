@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,11 @@ class CoordBus {
 
   int64_t room_offset_ = 0;
   int64_t inbox_offset_ = 0;
+  std::map<std::string, int64_t> room_offsets_;
+
+  std::vector<std::string> JoinedRooms() const;
+  int64_t RoomOffsetFor(const std::string& chan) const;
+  void SetRoomOffsetFor(const std::string& chan, int64_t offset);
 
   static std::string SanitizeId(const std::string& id);
   static std::string NormalizeRoom(const std::string& name);

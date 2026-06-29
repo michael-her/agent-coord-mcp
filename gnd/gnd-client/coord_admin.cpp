@@ -210,56 +210,56 @@ struct BackendState {
 BackendState g_backend;
 #endif
 
-std::string AdminArgsToLine(const std::vector<std::string>& args) {
-  if (args.empty()) {
-    return {};
-  }
-  std::ostringstream line;
-  line << '/' << args.front();
-  for (size_t i = 1; i < args.size(); ++i) {
-    line << ' ' << args[i];
-  }
-  return line.str();
-}
 
 #ifdef _WIN32
-std::vector<std::string> IpcRequest(const std::string& pipe_name,
-                                    const nlohmann::json& req) {
+CoordChatResponse IpcRequest(const std::string& pipe_name,
+                             const nlohmann::json& req) {
+  CoordChatResponse out;
   HANDLE pipe = ConnectPipe(pipe_name);
   if (pipe == INVALID_HANDLE_VALUE) {
-    return {"failed to connect to coord-chat backend (is it running?)"};
+    out.lines = {"failed to connect to coord-chat backend (is it running?)"};
+    return out;
   }
 
   const std::string payload = req.dump() + "\n";
   if (!WriteAll(pipe, payload)) {
     CloseHandle(pipe);
-    return {"failed to write to coord-chat backend"};
+    out.lines = {"failed to write to coord-chat backend"};
+    return out;
   }
 
   std::string response_line;
   if (!ReadLine(pipe, response_line)) {
     CloseHandle(pipe);
-    return {"coord-chat backend closed unexpectedly"};
+    out.lines = {"coord-chat backend closed unexpectedly"};
+    return out;
   }
   CloseHandle(pipe);
 
   try {
     const auto j = nlohmann::json::parse(response_line);
     if (j.value("ok", false)) {
-      std::vector<std::string> lines;
       if (j.contains("lines") && j["lines"].is_array()) {
         for (const auto& item : j["lines"]) {
-          lines.push_back(item.get<std::string>());
+          out.lines.push_back(item.get<std::string>());
         }
       }
-      if (lines.empty()) {
-        lines.push_back("(no output)");
+      if (j.contains("action") && !j["action"].is_null()) {
+        out.action = j["action"].get<std::string>();
       }
-      return lines;
+      if (j.contains("currentRoom") && !j["currentRoom"].is_null()) {
+        out.current_room = j["currentRoom"].get<std::string>();
+      }
+      if (j.contains("autoMention") && !j["autoMention"].is_null()) {
+        out.auto_mention = j["autoMention"].get<std::string>();
+      }
+      return out;
     }
-    return {j.value("error", "coord-chat backend error")};
+    out.lines = {j.value("error", "coord-chat backend error")};
+    return out;
   } catch (const std::exception& e) {
-    return {std::string("invalid backend response: ") + e.what()};
+    out.lines = {std::string("invalid backend response: ") + e.what()};
+    return out;
   }
 }
 #endif
@@ -337,34 +337,35 @@ void StopCoordChatBackend() {
 #endif
 }
 
-std::vector<std::string> RunCoordAdmin(
+CoordChatResponse RunCoordChatLine(
     const std::filesystem::path& repo_root,
     const std::filesystem::path& coord_dir,
     const std::string& agent_id,
-    const std::vector<std::string>& args) {
-  if (args.empty()) {
-    return {"usage: missing admin command"};
-  }
-
+    const std::string& line) {
+  CoordChatResponse fail;
 #ifdef _WIN32
   const auto manifest = IpcManifestPath(coord_dir, agent_id);
   std::string pipe;
   if (!ReadManifestPipe(manifest, pipe)) {
     if (!StartCoordChatBackend(repo_root, coord_dir, agent_id)) {
-      return {"failed to start coord-chat backend"};
+      fail.lines = {"failed to start coord-chat backend"};
+      return fail;
     }
     if (!ReadManifestPipe(manifest, pipe)) {
-      return {"coord-chat backend started but ipc manifest missing"};
+      fail.lines = {"coord-chat backend started but ipc manifest missing"};
+      return fail;
     }
   }
 
-  nlohmann::json req{{"line", AdminArgsToLine(args)}};
+  nlohmann::json req{{"line", line}};
   return IpcRequest(pipe, req);
 #else
   (void)repo_root;
   (void)coord_dir;
   (void)agent_id;
-  return {"coord-chat backend IPC is Windows-only for now"};
+  (void)line;
+  fail.lines = {"coord-chat backend IPC is Windows-only for now"};
+  return fail;
 #endif
 }
 
