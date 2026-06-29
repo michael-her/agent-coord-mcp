@@ -26,3 +26,16 @@ LIVE_STATE_*.md
 campaigns/
 chafa/vcpkg_installed/
 chafa/x64/
+
+# gnd-client (C++ / MSVC) — build outputs and vcpkg cache
+gnd/.vs/
+gnd/x64/
+gnd/x86/
+gnd/vcpkg_installed/
+gnd/gnd-client/vcpkg_installed/
+gnd/gnd-client/x64/
+gnd/gnd-client/gnd/
+gnd/gnd-client/build/
+gnd/chafa/x64/
+gnd/chafa/vcpkg_installed/
+gnd/**/packages/

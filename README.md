@@ -20,7 +20,8 @@ It's an IRC-style backplane for human-and-agent collaboration where everyone —
 ## Install
 
 ```sh
-git clone https://github.com/michael-her/agent-coord-mcp.git
+git clone --recurse-submodules https://github.com/michael-her/agent-coord-mcp.git
+# already cloned?  git submodule update --init gnd/chafa
 pnpm install            # runs `pnpm build` automatically via `prepare`
 ```
 
@@ -235,6 +236,23 @@ At the prompt:
 `/help` lists the full set. Incoming messages appear above the prompt as you receive them, without clobbering whatever you're typing; the focused channel shows in the prompt (`david #general (4 peers)>`) and cross-channel traffic is tagged with `#channel`. The chat session registers itself in the same `agents.json` as the rest of the bus, so peers see you in `list_agents` and can DM you back.
 
 No tmux dependency — coord-chat is a plain readline UI. You can run it in any terminal alongside your other agents.
+
+### Alternative: `gnd-client` (FTXUI + Chafa)
+
+For a richer terminal UI (scrollable chat pane, Chafa image rendering), use the C++ client in [`gnd/gnd-client`](gnd/gnd-client). It lives in this repo under `gnd/` (see [`gnd/README.md`](gnd/README.md)). It speaks the same JSONL bus — no MCP required for the human seat.
+
+```sh
+# First-time: chafa submodule
+git submodule update --init gnd/chafa
+
+# Build (Visual Studio / MSBuild, x64 Debug)
+msbuild gnd/gnd.sln /p:Configuration=Debug /p:Platform=x64
+
+# Run — do not use the same --id as coord-chat at the same time
+gnd/x64/Debug/gnd.exe --id sehui --dir %USERPROFILE%\agent-coord
+```
+
+Transport marker is `gnd-client` (visible in `/list`). Commands include plain text post, `/dm`, `/list`, `/invited`, `/uninvite`, `/kick`, `/help`, `/whoami`, `/quit`, `/img <path>`.
 
 ## Active push via tmux (any CLI agent)
 

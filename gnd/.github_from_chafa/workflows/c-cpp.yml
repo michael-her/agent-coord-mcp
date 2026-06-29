@@ -1,0 +1,82 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Running prerequisites
+      run: >
+        sudo apt update -y
+
+        sudo apt install -y
+        automake
+        libtool
+        libglib2.0-dev
+        libavif-dev
+        libjpeg-dev
+        librsvg2-dev
+        libtiff-dev
+        libwebp-dev
+        gtk-doc-tools
+        docbook-xml
+        libxml2-utils
+        
+        export LD_LIBRARY_PATH=$(if [[ $CC == "clang" ]]; then echo -n '/usr/local/clang/lib'; fi)
+        
+        mkdir build
+        
+    - name: Building
+      working-directory: ./build
+      run: >
+        CFLAGS='
+        -g
+        -O2
+        -fsanitize=address,undefined 
+        -fsanitize-undefined-trap-on-error 
+        -fstack-protector-all 
+        -Werror
+        -Wno-error=attributes
+        -Wno-error=cast-qual
+        -Wno-error=unused
+        -Wno-error=unused-function
+        -Wno-error=unused-macros
+        -Wno-error=unused-parameter
+        -Wno-error=unused-variable
+        -Wno-error=unused-const-variable
+        -Wno-error=unused-value
+        -Wno-error=comment
+        -Wno-error=missing-braces'
+        ../autogen.sh --prefix=/usr --enable-gtk-doc --enable-man
+        
+        make -j4
+        
+    - name: Running tests
+      working-directory: ./build
+      run: make check || { RET=$$?; find . -name "test-suite.log" -exec cat {} + ; exit $RET; }
+      
+    - name: Installing chafa
+      working-directory: ./build
+      run: >
+        sudo make install
+        
+        chafa --version
+        
+    - name: Run post install
+      working-directory: ./tests
+      run: ./postinstall.sh
+      
+    - name: After failure
+      if: failure()
+      run: >
+        touch tests/test-suite.log
+        
+        cat tests/test-suite.log

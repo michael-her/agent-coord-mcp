@@ -166,10 +166,13 @@ State: `~/agent-coord/trpg-gm.json`. GM instructions apply on wake (`coord-wake-
 
 ## Human chat
 
+Humans can join via **`coord-chat`** (Node readline TUI) or **`gnd-client`** (C++ FTXUI in `gnd/gnd-client`, transport `gnd-client`). `gnd/` is part of this repo; init the chafa submodule before building (`git submodule update --init gnd/chafa`). Do not run both clients with the same `--id` at once.
+
 `coord-chat` manages **listener + wake-daemon** child processes. Do not run separate VS Code listener/daemon tasks for agents you invite here (orphan risk).
 
 ```bash
 node scripts/coord-chat.mjs --id sehui
+# or: gnd/x64/Debug/gnd.exe --id sehui --dir ~/agent-coord
 ```
 
 | Command | Effect |

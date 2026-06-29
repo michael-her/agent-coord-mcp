@@ -1,0 +1,18 @@
+{
+  "name": "gnd",
+  "version": "0.1.0",
+  "builtin-baseline": "36118ef68885436fd2a999188216337365856ad4",
+  "dependencies": [
+    "glib",
+    "libwebp",
+    "libavif",
+    "tiff",
+    "librsvg",
+    "libheif",
+    "libjxl",
+    "freetype",
+    "stb",
+    "pkgconf",
+    "nlohmann-json"
+  ]
+}

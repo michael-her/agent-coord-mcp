@@ -1,0 +1,32 @@
+
+# 기본 베이스 스타일 선택 (Google, LLVM, Microsoft, Mozilla, WebKit 중 선택)
+BasedOnStyle: Microsoft
+
+# 들여쓰기 너비 (2칸)
+IndentWidth: 2
+TabWidth: 2
+
+# 탭 대신 스페이스 사용
+UseTab: Never
+
+# 한 줄의 최대 길이
+ColumnLimit: 128
+
+# 중괄호 스타일 (Linux 스타일, Attach 등)
+BreakBeforeBraces: Attach
+
+# 짧은 람다는 한 줄로 허용할지 여부
+#AllowShortLambdasOnASingleLine: All 
+
+# 람다 본문 인덴트를 서명(Signature)에 맞출지, 바깥쪽 코드에 맞출지 결정
+# 1. 람다 본문 인덴트를 바깥쪽 코드 수준에 맞춤 (Signature 대신 OuterScope)
+LambdaBodyIndentation: OuterScope
+
+# 2. 함수 호출 시 인자가 길어 줄바꿈될 때, 여는 괄호 '(' 다음 칸에 맞추지 않고 한 단계 들여쓰기만 함
+AlignAfterOpenBracket: DontAlign
+
+# 3. 연속된 줄의 들여쓰기 크기 설정 (기본 4 또는 IndentWidth와 동일하게)
+ContinuationIndentWidth: 4
+
+# 5. 람다가 인자로 쓰일 때 앞부분(함수명 등)과의 조화를 위한 설정
+AllowShortLambdasOnASingleLine: None

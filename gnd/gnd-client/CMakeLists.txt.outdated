@@ -1,0 +1,24 @@
+cmake_minimum_required(VERSION 3.15)
+project(gnd)
+
+# C++ 표준 설정
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# vcpkg에서 glib 패키지 찾기
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GLIB REQUIRED glib-2.0 gobject-2.0 gio-2.0)
+find_path(STB_INCLUDE_DIR stb_image.h)
+
+# 실행 파일 생성
+add_executable(gnd main.cpp)
+
+# 로컬에 빌드된 chafa 라이브러리 경로 설정
+target_include_directories(gnd PRIVATE "G:/test/chafa/chafa" ${STB_INCLUDE_DIR} ${GLIB_INCLUDE_DIRS})
+target_link_directories(gnd PRIVATE "G:/test/chafa/chafa/.libs" ${GLIB_LIBRARY_DIRS})
+
+# 라이브러리 링크
+target_link_libraries(gnd PRIVATE
+    ${GLIB_LIBRARIES}
+    "G:/test/chafa/chafa/.libs/libchafa.dll.a"
+)

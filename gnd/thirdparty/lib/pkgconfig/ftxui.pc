@@ -1,0 +1,9 @@
+prefix="G:/test/FTXUI/out/install/x64-Debug"
+libdir="G:/test/FTXUI/out/install/x64-Debug/lib"
+includedir="G:/test/FTXUI/out/install/x64-Debug/include"
+
+Name: ftxui
+Description: C++ Functional Terminal User Interface.
+Version: 6.1.9
+Cflags: -I${includedir}
+Libs: -L${libdir} -lftxui-component -lftxui-dom -lftxui-screen

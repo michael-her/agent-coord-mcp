@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -232,6 +239,72 @@ export function stopAgent(agentId, hooksDir) {
 
 export function stopAll(hooksDir) {
   for (const id of [...stacks.keys()]) stopAgent(id, hooksDir);
+}
+
+function readPidFromFile(file) {
+  if (!existsSync(file)) return 0;
+  try {
+    return parseInt(readFileSync(file, "utf8").trim(), 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Hook stacks visible on disk (coord-listener-*.pid), including VS Code tasks. */
+export function discoverHookStacks(hooksDir) {
+  if (!existsSync(hooksDir)) return [];
+  const out = [];
+  for (const name of readdirSync(hooksDir)) {
+    const m = /^coord-listener-(.+)\.pid$/.exec(name);
+    if (!m) continue;
+    const agentId = m[1].toLowerCase();
+    const listenerPid = readPidFromFile(path.join(hooksDir, name));
+    const daemonPid = readPidFromFile(
+      pidFile(hooksDir, `coord-wake-daemon-${agentId}.pid`),
+    );
+    out.push({
+      agentId,
+      listenerPid: listenerPid || null,
+      daemonPid: daemonPid || null,
+      listenerAlive: listenerPid ? childAlive({ pid: listenerPid }) : false,
+      daemonAlive: daemonPid ? childAlive({ pid: daemonPid }) : false,
+    });
+  }
+  return out.sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
+
+function hookStackPresent(hooksDir, agentId) {
+  const id = String(agentId ?? "").trim().toLowerCase();
+  const listenerPid = readPidFromFile(pidFile(hooksDir, `coord-listener-${id}.pid`));
+  const daemonPid = readPidFromFile(pidFile(hooksDir, `coord-wake-daemon-${id}.pid`));
+  return (
+    (listenerPid && childAlive({ pid: listenerPid })) ||
+    (daemonPid && childAlive({ pid: daemonPid })) ||
+    listenerPid > 0 ||
+    daemonPid > 0
+  );
+}
+
+/** Stop in-memory stack or hook PID files for one agent. Returns true if anything was stopped. */
+export function stopHookStack(hooksDir, agentId) {
+  const id = String(agentId ?? "").trim().toLowerCase();
+  const had = stacks.has(id) || hookStackPresent(hooksDir, id);
+  if (stacks.has(id)) {
+    stopAgent(id, hooksDir);
+    return true;
+  }
+  killStaleHookProcesses(hooksDir, id);
+  return had;
+}
+
+/** Stop all in-memory stacks and every hook stack found via PID files. */
+export function stopAllHookStacks(hooksDir) {
+  const ids = new Set([...stacks.keys()]);
+  for (const row of discoverHookStacks(hooksDir)) {
+    ids.add(row.agentId);
+  }
+  for (const id of ids) stopHookStack(hooksDir, id);
+  return [...ids].sort((a, b) => a.localeCompare(b));
 }
 
 export function writeTransportMarker({ transportDir, agentId, model, listener, daemon }) {

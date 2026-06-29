@@ -1,0 +1,16 @@
+# --- Visual Studio ---
+.vs/
+out/
+debug/
+release/
+x64/
+x86/
+
+# --- vcpkg & NuGet ---
+vcpkg_installed/
+packages/
+
+# --- other files ---
+.DS_Store
+*.log
+*.tmp

@@ -2,6 +2,100 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "agent wake stack (rico)",
+      "dependsOn": [
+        "coord-listener (rico)",
+        "coord-wake-daemon (rico)"
+      ],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "coord-listener (rico)",
+      "type": "shell",
+      "command": "node .cursor/hooks/coord-listener.mjs",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "AGENT_COORD_ID": "rico",
+          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord",
+          "CURSOR_PROJECT_DIR": "${workspaceFolder}",
+          "COORD_WAKE": "1",
+          "COORD_WAKE_DAEMON": "1",
+          "COORD_AUTO_REPLY": "0"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "coord",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[coord-listener\\]",
+          "endsPattern": "Ctrl\\+C to stop"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "rico-wake-stack"
+      }
+    },
+    {
+      "label": "coord-wake-daemon (rico)",
+      "type": "shell",
+      "command": "node .cursor/hooks/coord-wake-daemon.mjs",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "AGENT_COORD_ID": "rico",
+          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord",
+          "CURSOR_PROJECT_DIR": "${workspaceFolder}",
+          "COORD_WAKE": "1",
+          "COORD_WAKE_DAEMON": "1",
+          "COORD_WAKE_MODEL": "composer-2.5",
+          "COORD_AUTO_REPLY": "0"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "coord",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[coord-wake-daemon\\]",
+          "endsPattern": "agent=rico"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "rico-wake-stack"
+      }
+    },
+    {
+      "label": "gnd-client (sehui)",
+      "type": "shell",
+      "command": "${workspaceFolder}/gnd/x64/Debug/gnd.exe --id sehui --dir ${env:USERPROFILE}/agent-coord",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "AiRPG (sehui)",
       "type": "shell",
       "command": "node scripts/coord-chat.mjs --id sehui",
@@ -9,7 +103,9 @@
         "cwd": "${workspaceFolder}",
         "shell": {
           "executable": "G:\\ide\\Git\\bin\\bash.exe",
-          "args": ["-lc"]
+          "args": [
+            "-lc"
+          ]
         },
         "env": {
           "AGENT_COORD_DIR": "${env:USERPROFILE}/agent-coord"
@@ -18,7 +114,9 @@
       "isBackground": true,
       "problemMatcher": {
         "owner": "coord",
-        "pattern": { "regexp": "^$" },
+        "pattern": {
+          "regexp": "^$"
+        },
         "background": {
           "activeOnStart": true,
           "beginsPattern": "agent-coord",
