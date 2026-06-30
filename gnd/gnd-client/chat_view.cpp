@@ -33,6 +33,7 @@ namespace {
 using namespace ftxui;
 
 constexpr int kDefaultWrapWidth = 80;
+constexpr float kChatBackgroundBrightness = 0.5f;
 
 std::string Trim(const std::string& s) {
   size_t b = 0;
@@ -127,6 +128,11 @@ Element MakeWordElement(const WordPiece& w, const AgentColors& colors,
 
 Element GutterBar(const AgentColors& colors, const std::string& agent_id) {
   return text("▎ ") | color(colors.ColorFor(agent_id));
+}
+
+// FTXUI dbox: Default bgcolor is transparent — image layer shows through.
+Element OverImageText(Element el) {
+  return el | bgcolor(Color::Default);
 }
 
 }  // namespace
@@ -265,7 +271,9 @@ void ChatView::EnsureChatBackground() const {
     if (!std::filesystem::exists(path)) {
       continue;
     }
-    if (auto element = RenderImageElementFitHeight(path.string(), rows)) {
+    if (auto element = RenderImageElementFitHeight(path.string(), rows,
+                                                   kChatBackgroundBrightness,
+                                                   true)) {
       chat_bg_ = std::move(*element);
       chat_bg_rows_ = rows;
       return;
@@ -279,7 +287,7 @@ void ChatView::EnsureChatBackground() const {
 Element ChatView::RenderMessageStack() const {
   EnsureChatBackground();
 
-  Element messages = RenderMessages() | flex;
+  Element messages = OverImageText(RenderMessages()) | flex;
   if (!chat_bg_) {
     return messages;
   }

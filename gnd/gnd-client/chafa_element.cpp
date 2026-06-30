@@ -70,7 +70,7 @@ std::string GunicharToUtf8(gunichar ch) {
   return std::string(buf, static_cast<size_t>(len));
 }
 
-Element CanvasToElement(ChafaCanvas* canvas) {
+Element CanvasToElement(ChafaCanvas* canvas, bool bg_only = false) {
   if (!canvas) {
     return filler();
   }
@@ -91,6 +91,16 @@ Element CanvasToElement(ChafaCanvas* canvas) {
       gint fg = -1;
       gint bg = -1;
       chafa_canvas_get_raw_colors_at(canvas, x, y, &fg, &bg);
+
+      if (bg_only) {
+        const gint packed = bg >= 0 ? bg : fg;
+        if (packed < 0) {
+          cells.push_back(text(" "));
+        } else {
+          cells.push_back(text(" ") | bgcolor(PackedRgb(packed)));
+        }
+        continue;
+      }
 
       if (ch == 0 || (ch == ' ' && fg < 0 && bg < 0)) {
         cells.push_back(text(" "));
@@ -141,15 +151,30 @@ std::optional<std::string> RenderPixelsAnsi(const unsigned char* pixels,
 
 std::optional<Element> RenderPixelsElement(const unsigned char* pixels,
                                            int width, int height,
-                                           int channels, int cols, int rows) {
+                                           int channels, int cols, int rows,
+                                           bool bg_only = false) {
   ChafaCanvas* canvas =
       BuildCanvas(pixels, width, height, channels, cols, rows);
   if (!canvas) {
     return std::nullopt;
   }
-  Element element = CanvasToElement(canvas);
+  Element element = CanvasToElement(canvas, bg_only);
   chafa_canvas_unref(canvas);
   return element;
+}
+
+void ScalePixelBrightness(unsigned char* pixels, int width, int height,
+                          float brightness) {
+  if (!pixels || brightness >= 0.999f) {
+    return;
+  }
+  brightness = std::max(0.f, brightness);
+  const int count = width * height * 4;
+  for (int i = 0; i < count; i += 4) {
+    pixels[i + 0] = static_cast<unsigned char>(pixels[i + 0] * brightness);
+    pixels[i + 1] = static_cast<unsigned char>(pixels[i + 1] * brightness);
+    pixels[i + 2] = static_cast<unsigned char>(pixels[i + 2] * brightness);
+  }
 }
 
 }  // namespace
@@ -185,7 +210,9 @@ std::optional<Element> RenderImageElement(const std::string& path, int cols,
 }
 
 std::optional<Element> RenderImageElementFitHeight(const std::string& path,
-                                                   int target_rows) {
+                                                   int target_rows,
+                                                   float brightness,
+                                                   bool bg_only) {
   int width = 0;
   int height = 0;
   int channels = 0;
@@ -195,6 +222,7 @@ std::optional<Element> RenderImageElementFitHeight(const std::string& path,
     stbi_image_free(pixels);
     return std::nullopt;
   }
+  ScalePixelBrightness(pixels, width, height, brightness);
   if (target_rows <= 0) {
     target_rows = height;
   }
@@ -215,7 +243,7 @@ std::optional<Element> RenderImageElementFitHeight(const std::string& path,
     return std::nullopt;
   }
 
-  auto out = RenderPixelsElement(pixels, width, height, 4, cols, rows);
+  auto out = RenderPixelsElement(pixels, width, height, 4, cols, rows, bg_only);
   stbi_image_free(pixels);
   return out;
 }
