@@ -5,6 +5,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <cmath>
 #include <regex>
 #include <string>
 
@@ -12,6 +13,11 @@ namespace gnd {
 namespace {
 
 using namespace ftxui;
+
+constexpr int kCellWidth = 8;
+constexpr int kCellHeight = 16;
+constexpr float kFontRatio =
+    static_cast<float>(kCellWidth) / static_cast<float>(kCellHeight);
 
 ChafaCanvas* BuildCanvas(const unsigned char* pixels, int width, int height,
                          int channels, int cols, int rows) {
@@ -22,6 +28,7 @@ ChafaCanvas* BuildCanvas(const unsigned char* pixels, int width, int height,
 
   ChafaCanvasConfig* config = chafa_canvas_config_new();
   chafa_canvas_config_set_geometry(config, cols, rows);
+  chafa_canvas_config_set_cell_geometry(config, kCellWidth, kCellHeight);
   chafa_canvas_config_set_canvas_mode(config, CHAFA_CANVAS_MODE_TRUECOLOR);
   chafa_canvas_config_set_pixel_mode(config, CHAFA_PIXEL_MODE_SYMBOLS);
   chafa_canvas_config_set_transparency_threshold(config, 0.1f);
@@ -172,6 +179,42 @@ std::optional<Element> RenderImageElement(const std::string& path, int cols,
   if (!pixels) {
     return std::nullopt;
   }
+  auto out = RenderPixelsElement(pixels, width, height, 4, cols, rows);
+  stbi_image_free(pixels);
+  return out;
+}
+
+std::optional<Element> RenderImageElementFitHeight(const std::string& path,
+                                                   int target_rows) {
+  int width = 0;
+  int height = 0;
+  int channels = 0;
+  unsigned char* pixels =
+      stbi_load(path.c_str(), &width, &height, &channels, 4);
+  if (!pixels || width <= 0 || height <= 0) {
+    stbi_image_free(pixels);
+    return std::nullopt;
+  }
+  if (target_rows <= 0) {
+    target_rows = height;
+  }
+
+  gint cols = -1;
+  gint rows = target_rows;
+  chafa_calc_canvas_geometry(width, height, &cols, &rows, kFontRatio, FALSE,
+                             FALSE);
+  if (rows <= 0) {
+    stbi_image_free(pixels);
+    return std::nullopt;
+  }
+  cols = static_cast<gint>(std::lround(
+      static_cast<double>(width) * rows / static_cast<double>(height) *
+      static_cast<double>(kCellHeight) / static_cast<double>(kCellWidth) * 2.0));
+  if (cols <= 0) {
+    stbi_image_free(pixels);
+    return std::nullopt;
+  }
+
   auto out = RenderPixelsElement(pixels, width, height, 4, cols, rows);
   stbi_image_free(pixels);
   return out;

@@ -15,6 +15,10 @@ std::optional<std::string> RenderImageSymbols(const std::string& path, int cols,
 std::optional<ftxui::Element> RenderImageElement(const std::string& path,
                                                  int cols, int rows);
 
+// Render image scaled to fit target_rows height (aspect ratio preserved).
+std::optional<ftxui::Element> RenderImageElementFitHeight(const std::string& path,
+                                                          int target_rows);
+
 // Extract image path from /img <path> or markdown ![alt](path).
 std::optional<std::string> ExtractImagePath(const std::string& text);
 

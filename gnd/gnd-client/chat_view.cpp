@@ -236,34 +236,43 @@ int ChatView::TerminalHeight() const {
   return 24;
 }
 
+int ChatView::MessagePanelHeight() const {
+  int rows = TerminalHeight();
+  rows -= 4;  // room header, separators, input
+  if (!auto_mention_.empty()) {
+    rows -= 1;
+  }
+  rows -= static_cast<int>(busy_agents_.size());
+  if (!input_hint_tokens_.empty()) {
+    rows -= 1;
+  }
+  return std::max(8, rows);
+}
+
 void ChatView::EnsureChatBackground() const {
-  const int cols =
-      std::clamp(TerminalWidth() * 2 / 3, 24, 56);
-  const int rows = std::max(10, cols / 2);
-  if (chat_bg_ && chat_bg_cols_ == cols && chat_bg_rows_ == rows) {
+  const int rows = MessagePanelHeight();
+  if (chat_bg_ && chat_bg_rows_ == rows) {
     return;
   }
 
   const std::filesystem::path repo = bus_.Repo();
   const std::array<std::filesystem::path, 2> candidates = {
-      repo / "tankuku.png",
-      repo / "gnd" / "gnd-client" / "tankuku.png",
+      repo / "city.png",
+      repo / "gnd" / "gnd-client" / "city.png",
   };
 
   for (const auto& path : candidates) {
     if (!std::filesystem::exists(path)) {
       continue;
     }
-    if (auto element = RenderImageElement(path.string(), cols, rows)) {
+    if (auto element = RenderImageElementFitHeight(path.string(), rows)) {
       chat_bg_ = std::move(*element);
-      chat_bg_cols_ = cols;
       chat_bg_rows_ = rows;
       return;
     }
   }
 
   chat_bg_.reset();
-  chat_bg_cols_ = cols;
   chat_bg_rows_ = rows;
 }
 
@@ -275,7 +284,7 @@ Element ChatView::RenderMessageStack() const {
     return messages;
   }
 
-  Element background = center(*chat_bg_) | flex;
+  Element background = center(*chat_bg_);
   return dbox({std::move(background), std::move(messages)}) | flex;
 }
 

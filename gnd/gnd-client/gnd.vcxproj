@@ -112,6 +112,7 @@
     <ClCompile Include="coord_admin.cpp" />
     <ClCompile Include="coord_bus.cpp" />
     <ClCompile Include="demo_tab.cpp" />
+    <ClCompile Include="game_tab.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>

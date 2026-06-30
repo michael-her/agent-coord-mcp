@@ -59,6 +59,7 @@ class ChatView {
   std::string RelTime(int64_t ts) const;
   int TerminalWidth() const;
   int TerminalHeight() const;
+  int MessagePanelHeight() const;
   int SpinnerTick() const;
   void MaybeAttachImage(ChatMessage& msg);
   bool HandleMessageScroll(ftxui::Event event);
@@ -87,7 +88,6 @@ class ChatView {
   ftxui::Component input_component_;
   ftxui::Component root_;
   mutable std::optional<ftxui::Element> chat_bg_;
-  mutable int chat_bg_cols_ = 0;
   mutable int chat_bg_rows_ = 0;
 };
 

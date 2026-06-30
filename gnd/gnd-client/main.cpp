@@ -2,6 +2,7 @@
 #include "coord_admin.hpp"
 #include "coord_bus.hpp"
 #include "demo_tab.hpp"
+#include "game_tab.hpp"
 
 #include <ftxui/component/app.hpp>
 #include <ftxui/component/component.hpp>
@@ -164,16 +165,17 @@ int main(int argc, char** argv) {
 
   gnd::DemoState demo_state;
   auto demo_tab = gnd::BuildDemoTab(demo_state);
+  auto game_tab = gnd::BuildGameTab();
 
   gnd::ChatView chat_view(bus, [&] { screen.Exit(); });
   chat_view.LoadHistory(bus.RecentMessages(3));
 
   int tab_index = 0;
-  std::vector<std::string> tab_entries = {"Chat", "Demo"};
+  std::vector<std::string> tab_entries = {"Chat", "Game", "Demo"};
   auto tab_menu = Menu(&tab_entries, &tab_index, MenuOption::Horizontal());
 
   auto tab_content =
-      Container::Tab({chat_view.Build(), demo_tab}, &tab_index);
+      Container::Tab({chat_view.Build(), game_tab, demo_tab}, &tab_index);
 
   bool quitting = false;
   ButtonOption exit_opt = ButtonOption::Simple();
@@ -212,7 +214,7 @@ int main(int argc, char** argv) {
   while (!loop.HasQuitted()) {
     chat_view.Poll();
     chat_view.TickHeartbeat();
-    if (tab_index == 1) {
+    if (tab_index == 2) {
       gnd::DemoTick(demo_state);
     }
     if (chat_view.ShouldQuit()) {

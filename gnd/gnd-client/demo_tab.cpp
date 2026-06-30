@@ -116,6 +116,75 @@ std::map<std::string, float> GetStatisticsFromMSIAfterburner() {
   return statistics;
 }
 
+float FindStat(const std::map<std::string, float>& stats,
+               std::initializer_list<const char*> keys) {
+  for (const char* key : keys) {
+    const auto it = stats.find(key);
+    if (it != stats.end()) {
+      return it->second;
+    }
+  }
+  return 0.f;
+}
+
+int ScaleToHeight(float value, float max_value, int height) {
+  if (max_value <= 0.f) {
+    return 0;
+  }
+  const float normalized = std::clamp(value / max_value, 0.f, 1.f);
+  return static_cast<int>(normalized * height);
+}
+
+using GraphFunction = std::function<std::vector<int>(int, int)>;
+
+GraphFunction MakeHistoryGraph(
+    const DemoState& state,
+    std::function<float(const std::map<std::string, float>&)> extract,
+    float max_value) {
+  return [&state, extract = std::move(extract),
+          max_value](int width, int height) {
+    std::vector<int> output(width, 0);
+    if (state.statistics_history.empty()) {
+      return output;
+    }
+    const int data_size = static_cast<int>(state.statistics_history.size());
+    for (int i = 0; i < width; ++i) {
+      const int history_index = data_size - 1 - (width - 1 - i);
+      if (history_index < 0 || history_index >= data_size) {
+        continue;
+      }
+      const float value = extract(state.statistics_history[history_index]);
+      output[i] = ScaleToHeight(value, max_value, height);
+    }
+    return output;
+  };
+}
+
+template <typename Fn>
+Element RenderGraphPanel(const std::string& title, Fn graph_fn,
+                         const std::string& top, const std::string& mid,
+                         const std::string& bot,
+                         Color plot_color = Color::Default) {
+  GraphFunction fn = graph_fn;
+  Element plot = graph(std::move(fn)) | flex;
+  if (plot_color != Color::Default) {
+    plot = plot | color(plot_color);
+  }
+  return vbox({
+      text(title) | hcenter,
+      hbox({
+          vbox({
+              text(top),
+              filler(),
+              text(mid),
+              filler(),
+              text(bot),
+          }),
+          std::move(plot),
+      }) | flex,
+  });
+}
+
 Component BuildDemoTab(DemoState& state) {
   // ---------------------------------------------------------------------------
   // HTOP 탭 (시스템 모니터링 UI 데모)
@@ -244,65 +313,83 @@ Component BuildDemoTab(DemoState& state) {
     return output;
   };
 
-  // HTOP 화면을 구성하는 렌더러입니다.
-  // 주파수, 사용률, RAM 그래프를 수직(vbox) 및 수평(hbox)으로 배치합니다.
-  auto htop = Renderer([&] {
-    // P-Core 사용률 그래프 영역 구성
-    auto frequency = vbox({
-        text("P-Core Usage [%]") | hcenter, // 제목 가운데 정렬
-        hbox({
-            vbox({
-                // Y축 레이블 (최대 100% 기준)
-                text("100 "),
-                filler(), // 남은 공간을 채워 간격을 벌림
-                text("50 "),
-                filler(),
-                text("0 "),
-            }),
-            graph(std::ref(cpu_usage_graph)) | flex, // 실제 그래프 렌더링 (flex로 남은 공간 모두 차지)
-        }) | flex,
-    });
+  auto cpu_clock_graph = MakeHistoryGraph(
+      state,
+      [](const std::map<std::string, float>& stats) {
+        return FindStat(stats, {"CPU clock", "Core clock"});
+      },
+      6000.f);
 
-    // CPU 온도 그래프 영역 구성 (빨간색 적용)
-    auto temperature = vbox({
-        text("CPU Temperature [°C]") | hcenter,
-        hbox({
-            vbox({
-                text("100 "),
-                filler(),
-                text("50 "),
-                filler(),
-                text("0 "),
-            }),
-            graph(std::ref(cpu_temperature_graph)) | color(Color::RedLight),
-        }) | flex,
-    });
+  auto ram_usage_graph = MakeHistoryGraph(
+      state,
+      [](const std::map<std::string, float>& stats) {
+        return FindStat(stats, {"RAM usage", "Memory usage",
+                                "Physical memory usage"});
+      },
+      100.f);
 
-    auto gpu_usage = vbox({
-        text("GPU Usage [%]") | hcenter,
-        hbox({
-            vbox({
-                text("100 "),
-                filler(),
-                text("50 "),
-                filler(),
-                text("0 "),
-            }),
-            graph(std::ref(gpu_usage_graph)) | color(Color::BlueLight),
-        }) | flex,
-    });
+  auto gpu_temperature_graph = MakeHistoryGraph(
+      state,
+      [](const std::map<std::string, float>& stats) {
+        return FindStat(stats, {"GPU temperature", "GPU1 temperature"});
+      },
+      100.f);
 
-    // 세 개의 그래프 영역을 최종적으로 조합하여 반환합니다.
-		ftxui::Element ret = hbox({
-				vbox({
-						frequency | flex,
-						separator(), // 구분선
-						temperature | flex,
-				}) | flex,
-				separator(),
-				gpu_usage | flex,
-		}) | flex;
-    return ret;
+  // HTOP 화면: MSI 실시간 그래프 + 원본 FTXUI 사인파 데모 그래프
+  auto htop = Renderer([=] {
+    const auto msi_row1 = hbox({
+        RenderGraphPanel("P-Core Usage [%]", cpu_usage_graph, "100 ", "50 ",
+                         "0 ") |
+            flex,
+        separator(),
+        RenderGraphPanel("CPU Temperature [C]", cpu_temperature_graph, "100 ",
+                         "50 ", "0 ", Color::RedLight) |
+            flex,
+        separator(),
+        RenderGraphPanel("GPU Usage [%]", gpu_usage_graph, "100 ", "50 ", "0 ",
+                         Color::BlueLight) |
+            flex,
+    }) | flex;
+
+    const auto msi_row2 = hbox({
+        RenderGraphPanel("Core Clock [MHz]", cpu_clock_graph, "6000", "3000",
+                         "0 ", Color::GreenLight) |
+            flex,
+        separator(),
+        RenderGraphPanel("RAM Usage [%]", ram_usage_graph, "100 ", "50 ", "0 ",
+                         Color::CyanLight) |
+            flex,
+        separator(),
+        RenderGraphPanel("GPU Temperature [C]", gpu_temperature_graph, "100 ",
+                         "50 ", "0 ", Color::MagentaLight) |
+            flex,
+    }) | flex;
+
+    const auto wave_row = hbox({
+        vbox({
+            RenderGraphPanel("Frequency [MHz]", my_graph, "2400 ", "1200 ",
+                             "0 ") |
+                flex,
+            separator(),
+            RenderGraphPanel("Utilization [%]", my_graph, "100 ", "50 ", "0 ",
+                             Color::RedLight) |
+                flex,
+        }) | flex,
+        separator(),
+        RenderGraphPanel("RAM [MB]", my_graph, "8192", "4096 ", "0 ",
+                         Color::BlueLight) |
+            flex,
+    }) | flex;
+
+    return vbox({
+        text("MSI Afterburner") | bold | dim,
+        msi_row1 | size(HEIGHT, EQUAL, 8),
+        separator(),
+        msi_row2 | size(HEIGHT, EQUAL, 8),
+        separator(),
+        text("FTXUI wave demo") | bold | dim,
+        wave_row | flex,
+    }) | flex | yframe | vscroll_indicator;
   });
 
   // ---------------------------------------------------------------------------
@@ -476,7 +563,7 @@ Component BuildDemoTab(DemoState& state) {
   // ---------------------------------------------------------------------------
   // Spinner 탭 (로딩 애니메이션 데모)
   // ---------------------------------------------------------------------------
-  auto spinner_tab_renderer = Renderer([&] {
+  auto spinner_tab_renderer = Renderer([&state] {
     Elements entries;
     // FTXUI가 제공하는 22가지의 다양한 스피너 스타일을 렌더링합니다.
     // state.shift 값을 사용하여 애니메이션 프레임을 진행시킵니다.
@@ -641,7 +728,7 @@ Component BuildDemoTab(DemoState& state) {
   };
 
   // 왼쪽 패널: 다양한 텍스트 정렬 방식과 flexbox 레이아웃을 보여줍니다.
-  auto paragraph_renderer_left = Renderer([&] {
+  auto paragraph_renderer_left = Renderer([make_box] {
     std::string str = "Lorem Ipsum is simply dummy text of the printing and typesetting "
                       "industry.\nLorem Ipsum has been the industry's standard dummy text "
                       "ever since the 1500s, when an unknown printer took a galley of type "
@@ -684,7 +771,7 @@ Component BuildDemoTab(DemoState& state) {
       std::max(20, static_cast<int>(Terminal::Size().dimx) / 2);
   auto paragraph_renderer_group =
       ResizableSplitLeft(paragraph_renderer_left, paragraph_renderer_right, &paragraph_renderer_split_position);
-  auto paragraph_renderer_group_renderer = Renderer(paragraph_renderer_group, [&] {
+  auto paragraph_renderer_group_renderer = Renderer(paragraph_renderer_group, [=] {
     return paragraph_renderer_group->Render();
   });
 
@@ -721,7 +808,7 @@ Component BuildDemoTab(DemoState& state) {
       tab_content,
   });
 
-  return Renderer(main_container, [&] {
+  return Renderer(main_container, [=] {
     return vbox({
         text("FTXUI Demo") | bold | hcenter | size(HEIGHT, EQUAL, 1),
         main_container->Render() | flex | yframe,
