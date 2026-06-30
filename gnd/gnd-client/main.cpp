@@ -165,7 +165,8 @@ int main(int argc, char** argv) {
 
   gnd::DemoState demo_state;
   auto demo_tab = gnd::BuildDemoTab(demo_state);
-  auto game_tab = gnd::BuildGameTab();
+  gnd::GameState game_state;
+  auto game_tab = gnd::BuildGameTab(game_state);
 
   gnd::ChatView chat_view(bus, [&] { screen.Exit(); });
   chat_view.LoadHistory(bus.RecentMessages(3));
@@ -214,6 +215,9 @@ int main(int argc, char** argv) {
   while (!loop.HasQuitted()) {
     chat_view.Poll();
     chat_view.TickHeartbeat();
+    if (tab_index == 1) {
+      gnd::GameTick(game_state);
+    }
     if (tab_index == 2) {
       gnd::DemoTick(demo_state);
     }
